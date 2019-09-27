@@ -15,6 +15,7 @@ import chisel3.internal.sourceinfo.SourceInfo
 import chisel3.experimental.dontTouch
 
 case class ICacheParams(
+    naiveCache: Bool = true,
     nSets: Int = 64,
     nWays: Int = 4,
     rowBits: Int = 128,
@@ -48,7 +49,7 @@ class ICacheErrors(implicit p: Parameters) extends CoreBundle()(p)
 }
 
 class ICache(val icacheParams: ICacheParams, val hartId: Int)(implicit p: Parameters) extends LazyModule {
-  lazy val module = new ICacheModule(this)
+  lazy val module = if(icacheParams.naiveCache) new NaiveICacheModule(this) else new ICacheModule(this)
   val masterNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters(
     sourceId = IdRange(0, 1 + icacheParams.prefetch.toInt), // 0=refill, 1=hint
     name = s"Core ${hartId} ICache")))))
@@ -102,6 +103,27 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
   val keep_clock_enabled = Bool(OUTPUT)
 }
 
+class NaiveICacheModule(outer: ICache) extends LazyModuleImp(outer)
+    with HasL1ICacheParameters {
+  override val cacheParams = outer.icacheParams // Use the local parameters
+
+  val io = IO(new ICacheBundle(outer))
+  val (tl_out, edge_out) = outer.masterNode.out(0)
+
+  val wordBits = outer.icacheParams.fetchBytes*8
+  require(tl_out.d.bits.data.getWidth == wordBits, "line size must match ifetch size")
+
+  val request_refill = Wire(Bool(), false.B)
+  val refill_addr = io.req.bits.addr
+
+  // request new data from mem
+  tl_out.a.valid := request_refill
+  tl_out.a.bits := edge_out.Get(
+    fromSource = UInt(0),
+    toAddress = (refill_addr >> blockOffBits) << blockOffBits,
+    lgSize = lgCacheBlockBytes)._2
+}
+
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
   override val cacheParams = outer.icacheParams // Use the local parameters
@@ -110,6 +132,50 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val (tl_out, edge_out) = outer.masterNode.out(0)
   // Option.unzip does not exist :-(
   val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
+
+
+
+  def prettyPrintIO(d: Data, depth: Int = 0, indent: String = "  ") : String = {
+    val desc = d match {
+      case aggregate: Aggregate => aggregate match {
+        case vec: Vec[_] => {
+          val children = vec.map((d) => s"${indent * (depth + 1)}${prettyPrintIO(d, depth + 1)},\n"
+          ).reduce(_+_)
+          s"Vec(\n$children${indent * depth})"
+        }
+        case record: Record => record match {
+          case bundle: Bundle => {
+            val className = bundle.getClass.getName
+            val name = if (className.contains("$")) bundle.className else className
+            val children = if(bundle.elements.nonEmpty) bundle.elements.toList.reverse.map {
+              case (st, d) => s"${indent * (depth + 1)}$st = ${prettyPrintIO(d, depth + 1)}\n"
+            }.reduce(_+_) else ""
+            s"$name{\n$children${indent * depth}}"
+          }
+          case _ => record.className
+        }
+      }
+      case element: Element => {
+        val widthInfo = s"(${if (element.widthKnown) element.getWidth + ".W" else ""})"
+        element match {
+          case bool: Bool => "Bool()"
+          case uint: UInt => s"UInt($widthInfo)"
+          case sint: SInt => s"SInt($widthInfo)"
+          case _ => s"${element.getClass.getName}(${if (element.widthKnown) element.getWidth else "?"})"
+        }
+      }
+      case _ => "Data??"
+    }
+    d.dir match {
+      case Chisel.INPUT => s"Input($desc)"
+      case Chisel.NODIR => s"$desc"
+      case Chisel.OUTPUT => s"Output($desc)"
+    }
+  }
+
+  println("ICacheModule.io = "+prettyPrintIO(io))
+  println("ICacheModule.tl_out = "+prettyPrintIO(tl_out))
+  println("ICacheModule.tl_in = "+tl_in.map(prettyPrintIO(_)).getOrElse("doesn't exist (None)"))
 
   val tECC = cacheParams.tagCode
   val dECC = cacheParams.dataCode
