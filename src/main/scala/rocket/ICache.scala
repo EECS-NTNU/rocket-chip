@@ -15,7 +15,7 @@ import chisel3.internal.sourceinfo.SourceInfo
 import chisel3.experimental.dontTouch
 
 case class ICacheParams(
-    naiveCache: Bool = true,
+    naiveCache: Boolean = true,
     nSets: Int = 64,
     nWays: Int = 4,
     rowBits: Int = 128,
@@ -49,7 +49,7 @@ class ICacheErrors(implicit p: Parameters) extends CoreBundle()(p)
 }
 
 class ICache(val icacheParams: ICacheParams, val hartId: Int)(implicit p: Parameters) extends LazyModule {
-  lazy val module = if(icacheParams.naiveCache) new NaiveICacheModule(this) else new ICacheModule(this)
+  lazy val module: BaseICacheModule = if(icacheParams.naiveCache) new NaiveICacheModule(this) else new ICacheModule(this)
   val masterNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters(
     sourceId = IdRange(0, 1 + icacheParams.prefetch.toInt), // 0=refill, 1=hint
     name = s"Core ${hartId} ICache")))))
@@ -102,34 +102,56 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
   val clock_enabled = Bool(INPUT)
   val keep_clock_enabled = Bool(OUTPUT)
 }
-
-class NaiveICacheModule(outer: ICache) extends LazyModuleImp(outer)
-    with HasL1ICacheParameters {
+class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
+  with HasL1ICacheParameters {
   override val cacheParams = outer.icacheParams // Use the local parameters
 
   val io = IO(new ICacheBundle(outer))
   val (tl_out, edge_out) = outer.masterNode.out(0)
+}
+// a naive ICache implementation, that fetches from memory all the time (no actual cache)
+class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
   val wordBits = outer.icacheParams.fetchBytes*8
-  require(tl_out.d.bits.data.getWidth == wordBits, "line size must match ifetch size")
+  require(tl_out.d.bits.data.getWidth%wordBits == 0)
 
-  val request_refill = Wire(Bool(), false.B)
-  val refill_addr = io.req.bits.addr
-
+  val refill_addr = io.s1_paddr
+  val s0_valid = io.req.fire()
+  val vaddr = RegNext(io.req.bits.addr, s0_valid)
+  val s1_valid = RegNext(s0_valid, false.B)
+  val request_refill = s1_valid
+  val refilling = RegInit(false.B)
+  val mem_response = Wire(Vec(tl_out.d.bits.data.getWidth/wordBits, UInt(wordBits.W)))
+  val mem_response_arrived = tl_out.d.fire() && edge_out.hasData(tl_out.d.bits)
+  val line_index = vaddr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8))
+  when(request_refill){
+    refilling := true.B
+  }.elsewhen(mem_response_arrived){
+    refilling := false.B
+  }
+  mem_response := tl_out.d.bits.data
   // request new data from mem
   tl_out.a.valid := request_refill
   tl_out.a.bits := edge_out.Get(
     fromSource = UInt(0),
     toAddress = (refill_addr >> blockOffBits) << blockOffBits,
     lgSize = lgCacheBlockBytes)._2
+
+  tl_out.d.ready := true.B
+  tl_out.b.ready := Bool(true)
+  tl_out.c.valid := Bool(false)
+  tl_out.e.valid := Bool(false)
+    // only be ready when no request is in progress
+  io.req.ready := !s0_valid && !refilling || mem_response_arrived
+  io.resp.valid := mem_response_arrived
+  io.resp.bits.data := mem_response(line_index)
+  io.resp.bits.ae := false.B
+  io.resp.bits.replay := false.B
+  io.keep_clock_enabled := true.B
+  io.perf.acquire := request_refill
 }
 
-class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
-    with HasL1ICacheParameters {
-  override val cacheParams = outer.icacheParams // Use the local parameters
-
-  val io = IO(new ICacheBundle(outer))
-  val (tl_out, edge_out) = outer.masterNode.out(0)
+class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   // Option.unzip does not exist :-(
   val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
 
