@@ -5,6 +5,7 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
+import chisel3.core.WireInit
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
@@ -109,46 +110,79 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val io = IO(new ICacheBundle(outer))
   val (tl_out, edge_out) = outer.masterNode.out(0)
 }
-// a naive ICache implementation, that fetches from memory all the time (no actual cache)
+// a naive ICache implementation, that fetches from memory almost all the time (1 cache line)
 class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
-
   val wordBits = outer.icacheParams.fetchBytes*8
+  val wordsPerBeat = tl_out.d.bits.getWidth/wordBits
   require(tl_out.d.bits.data.getWidth%wordBits == 0)
+  require(outer.icacheParams.latency == 2)
 
-  val refill_addr = io.s1_paddr
-  val s0_valid = io.req.fire()
-  val vaddr = RegNext(io.req.bits.addr, s0_valid)
+  // cycle signals
+  val s0_valid = WireInit(io.req.fire())
   val s1_valid = RegNext(s0_valid, false.B)
-  val request_refill = s1_valid
+  val s2_valid = RegNext(s1_valid, false.B)
+
+  val s0_vaddr = WireInit(io.req.bits.addr)
+  val s1_vaddr = RegNext(s0_vaddr)
+  val s2_vaddr = RegNext(s1_vaddr)
+  val s1_paddr = WireInit(io.s1_paddr)
+
+  val s2_line_index = s2_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
+
+  val s1_ptag = WireInit(io.s1_paddr >> blockOffBits)
+  val s1_tag_match = Wire(Bool())
+  val s2_tag_match = RegNext(s1_tag_match)
+
+  // cache data structue
+  val line_valid = RegInit(false.B)
+  val s1_request_refill = s1_valid && (!s1_tag_match || !line_valid)
+  val tag = RegEnable(io.s1_paddr >> blockOffBits, s1_request_refill)
+  val cache_line = Reg(Vec(cacheBlockBytes*8/wordBits, UInt(wordBits.W)))
+
+  // refill signals
   val refilling = RegInit(false.B)
-  val mem_response = Wire(Vec(tl_out.d.bits.data.getWidth/wordBits, UInt(wordBits.W)))
-  val mem_response_arrived = tl_out.d.fire() && edge_out.hasData(tl_out.d.bits)
-  val line_index = vaddr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8))
-  when(request_refill){
+  val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
+  val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
+
+  s1_tag_match := tag === s1_ptag
+  when(s1_request_refill){
     refilling := true.B
-  }.elsewhen(mem_response_arrived){
+    line_valid := false.B
+  }.elsewhen(d_refill_done){
     refilling := false.B
+    line_valid := true.B
   }
-  mem_response := tl_out.d.bits.data
+  // fill vector
+  when(mem_response_present) {
+    for (i <- 0 until wordsPerBeat) {
+      val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
+      val write_line_index = Cat(d_refill_cnt, beatIdx)
+      cache_line(write_line_index) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
+    }
+  }
+
+  // configure tilelink
   // request new data from mem
-  tl_out.a.valid := request_refill
+  tl_out.a.valid := s1_request_refill
   tl_out.a.bits := edge_out.Get(
     fromSource = UInt(0),
-    toAddress = (refill_addr >> blockOffBits) << blockOffBits,
+    toAddress = (s1_paddr >> blockOffBits) << blockOffBits,
+    // seems to not support smaller blocks
     lgSize = lgCacheBlockBytes)._2
-
   tl_out.d.ready := true.B
   tl_out.b.ready := Bool(true)
   tl_out.c.valid := Bool(false)
   tl_out.e.valid := Bool(false)
-    // only be ready when no request is in progress
-  io.req.ready := !s0_valid && !refilling || mem_response_arrived
-  io.resp.valid := mem_response_arrived
-  io.resp.bits.data := mem_response(line_index)
+
+  //configure IO
+  // only be ready when no refill is in progress
+  io.req.ready := !refilling && !s1_request_refill
+  io.resp.valid := s2_tag_match && s2_valid && line_valid
+  io.resp.bits.data := cache_line(s2_line_index)
   io.resp.bits.ae := false.B
   io.resp.bits.replay := false.B
   io.keep_clock_enabled := true.B
-  io.perf.acquire := request_refill
+  io.perf.acquire := s1_request_refill
 }
 
 class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
