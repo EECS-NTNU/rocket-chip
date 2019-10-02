@@ -26,7 +26,7 @@ VERILATOR_VERSION=3.904
 VERILATOR_SRCDIR ?= verilator/src/verilator-$(VERILATOR_VERSION)
 VERILATOR_TARGET := $(abspath verilator/install/bin/verilator)
 INSTALLED_VERILATOR ?= $(VERILATOR_TARGET)
-VERILATOR_MAKEFLAGS=-j8
+VERILATOR_MAKEFLAGS=-j6
 $(VERILATOR_TARGET): $(VERILATOR_SRCDIR)/bin/verilator
 	$(MAKE) -C $(VERILATOR_SRCDIR) installbin installdata
 	touch $@

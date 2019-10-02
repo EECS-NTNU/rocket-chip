@@ -27,7 +27,7 @@ class BaseSubsystemConfig extends Config ((site, here, up) => {
   case MemoryBusKey => MemoryBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   case FrontBusKey => FrontBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   // Additional device Parameters
-  case BootROMParams => BootROMParams(contentFileName = "./bootrom/bootrom.img")
+  case BootROMParams => BootROMParams(contentFileName = "/home/david/git/freedom/rocket-chip/bootrom/bootrom.img")
   case DebugModuleParams => DefaultDebugModuleParams(site(XLen))
   case CLINTKey => Some(CLINTParams())
   case PLICKey => Some(PLICParams())
@@ -47,6 +47,9 @@ class WithNBigCores(n: Int) extends Config((site, here, up) => {
         nMSHRs = 0,
         blockBytes = site(CacheBlockBytes))),
       icache = Some(ICacheParams(
+//        naiveCache = true,
+//        nSets = 2,
+//        nWays = 1,
         rowBits = site(SystemBusKey).beatBits,
         blockBytes = site(CacheBlockBytes))))
     List.tabulate(n)(i => big.copy(hartId = i))
