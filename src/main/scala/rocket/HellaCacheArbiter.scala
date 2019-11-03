@@ -12,7 +12,8 @@ class HellaCacheArbiter(n: Int)(implicit p: Parameters) extends Module
     val requestor = Vec(n, new HellaCacheIO).flip
     val mem = new HellaCacheIO
   }
-
+  import util.prettyPrintIO
+//  println("HellaCacheArbiter.io = "+prettyPrintIO(io))
   if (n == 1) {
     io.mem <> io.requestor.head
   } else {

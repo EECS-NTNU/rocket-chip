@@ -15,6 +15,11 @@ class TestHarness()(implicit p: Parameters) extends Module {
   val dut = Module(LazyModule(new ExampleRocketSystem).module)
   dut.reset := reset | dut.debug.ndreset
 
+//  import util.prettyPrintIO
+//
+//  for ((n,p) <- dut.portDict()) {
+//    println(s"dut.${n} = ${prettyPrintIO(p)}")
+//  }
   dut.dontTouchPorts()
   dut.tieOffInterrupts()
   dut.connectSimAXIMem()

@@ -119,6 +119,14 @@ package object util {
       else x(hi, lo)
     }
 
+
+    def extractZext(hi: Int, lo: Int): UInt = {
+      require(hi >= lo-1)
+      if (hi == lo-1) UInt(0)
+      else if(x.getWidth > hi) x(hi, lo)
+      else Cat(0.U((hi+1 - x.getWidth).W), x)(hi, lo)
+    }
+
     // Like Some(UInt.apply(hi, lo)), but returns None for zero-width extracts
     def extractOption(hi: Int, lo: Int): Option[UInt] = {
       require(hi >= lo-1)

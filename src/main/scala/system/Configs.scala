@@ -23,6 +23,8 @@ class BaseConfig extends Config(
 )
 
 class DefaultConfig extends Config(new WithNBigCores(1) ++ new BaseConfig)
+class DefaultNaiveConfig extends Config(new WithNBigNaiveCores(1) ++ new BaseConfig)
+class DefaultJTAGConfig extends Config(new WithNBigNaiveCores(1) ++ new WithJtagDTMSystem ++ new BaseConfig)
 
 class DefaultBufferlessConfig extends Config(
   new WithBufferlessBroadcastHub ++ new WithNBigCores(1) ++ new BaseConfig)

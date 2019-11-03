@@ -195,6 +195,10 @@ class HellaCacheModule(outer: HellaCache) extends LazyModuleImp(outer)
   implicit val edge = outer.node.edges.out(0)
   val (tl_out, _) = outer.node.out(0)
   val io = IO(new HellaCacheBundle(outer))
+
+//  import util.prettyPrintIO
+//  println("HellaCacheModule.io = "+prettyPrintIO(io))
+//  println("HellaCacheModule.tl_out = "+prettyPrintIO(tl_out))
   dontTouch(io.cpu.resp) // Users like to monitor these fields even if the core ignores some signals
   dontTouch(io.cpu.s1_data)
 

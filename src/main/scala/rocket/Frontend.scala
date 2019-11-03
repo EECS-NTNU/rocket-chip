@@ -75,6 +75,8 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
     with HasRocketCoreParameters
     with HasL1ICacheParameters {
   val io = IO(new FrontendBundle(outer))
+//  import util.prettyPrintIO
+//  println("Frontend.io = "+prettyPrintIO(io))
   implicit val edge = outer.masterNode.edges.out(0)
   val icache = outer.icache.module
   require(fetchWidth*coreInstBytes == outer.icacheParams.fetchBytes)

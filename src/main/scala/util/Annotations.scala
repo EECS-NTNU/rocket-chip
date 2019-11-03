@@ -190,6 +190,12 @@ trait DontTouch { self: RawModule =>
   }
 }
 
+trait PortDict { self: RawModule =>
+  def portDict(): Seq[(String, Data)] = {
+    self.getModulePorts.map(p => (p.instanceName, p))
+  }
+}
+
 /** Mix this into a Module class or instance to mark it for register retiming */
 trait ShouldBeRetimed { self: RawModule =>
   chisel3.experimental.annotate(new ChiselAnnotation { def toFirrtl: RetimeModuleAnnotation = RetimeModuleAnnotation(self.toNamed) })

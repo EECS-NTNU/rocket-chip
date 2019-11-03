@@ -64,6 +64,8 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
     val ptw = new TLBPTWIO
     val kill = Bool(INPUT) // suppress a TLB refill, one cycle after a miss
   }
+//  import util.prettyPrintIO
+//  println("TLB.io = "+prettyPrintIO(io))
 
   class EntryData extends Bundle {
     val ppn = UInt(width = ppnBits)

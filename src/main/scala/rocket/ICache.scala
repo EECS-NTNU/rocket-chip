@@ -5,7 +5,7 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import chisel3.core.WireInit
+import chisel3.core.{Input, Output, WireInit}
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
@@ -110,6 +110,8 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val io = IO(new ICacheBundle(outer))
   val (tl_out, edge_out) = outer.masterNode.out(0)
 }
+
+
 // a naive ICache implementation, that fetches from memory almost all the time (1 cache line)
 class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val wordBits = outer.icacheParams.fetchBytes*8
@@ -119,66 +121,73 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
   // cycle signals
   val s0_valid = WireInit(io.req.fire())
-  val s1_valid = RegNext(s0_valid, false.B)
-  val s2_valid = RegNext(s1_valid && !io.s1_kill, false.B)
+  val s1_valid = RegNext(s0_valid, false.B) && !io.s1_kill
+  val s2_valid = RegNext(s1_valid, false.B) && !io.s2_kill
 
   val s0_vaddr = WireInit(io.req.bits.addr)
   val s1_vaddr = RegNext(s0_vaddr)
   val s2_vaddr = RegNext(s1_vaddr)
   val s1_paddr = WireInit(io.s1_paddr)
+  val s2_paddr = RegNext(s1_paddr)
 
   val s2_line_index = s2_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
 
-  val s1_ptag = WireInit(io.s1_paddr >> blockOffBits)
-  val s1_tag_match = Wire(Bool())
-  val s2_tag_match = RegNext(s1_tag_match)
+  val s1_ptag = WireInit(s1_paddr >> blockOffBits)
+  val s2_ptag = RegNext(s1_ptag)
+  val s2_tag_match = Wire(Bool())//RegNext(s1_tag_match)
 
   // cache data structue
   val line_valid = RegInit(false.B)
-  val s1_request_refill = s1_valid && (!s1_tag_match || !line_valid)
-  val tag = RegEnable(io.s1_paddr >> blockOffBits, s1_request_refill)
+  val refilling = RegInit(false.B)
+  val s2_request_refill = s2_valid && !refilling && (!s2_tag_match || !line_valid)
+  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
   val cache_line = Reg(Vec(cacheBlockBytes*8/wordBits, UInt(wordBits.W)))
+  val tag = RegInit(0.U)
 
   // refill signals
-  val refilling = RegInit(false.B)
   val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
   val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
   val invalidated = RegInit(false.B)
 
-  s1_tag_match := tag === s1_ptag
-  when(s1_request_refill){
+  s2_tag_match := tag === s2_ptag
+  // equivalent to tl_out.a.ready && s2_request_refill - we need to check if tl a is ready
+  when(tl_out.a.fire()){
     refilling := true.B
-    line_valid := false.B
-  }.elsewhen(d_refill_done){
-    refilling := false.B
-    when(!invalidated){
-      line_valid := true.B
-    }
   }
-
+  // invalidation logic - we don't want a cache line that is being loaded to be valid after invalidation
   when(!refilling){
     invalidated := false.B
   }
-
   when(io.invalidate){
     line_valid := false.B
     invalidated := true.B
   }
+
+  // refill logic
   // fill vector
   when(mem_response_present) {
+    line_valid := false.B
     for (i <- 0 until wordsPerBeat) {
       val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
       val write_line_index = Cat(d_refill_cnt, beatIdx)
       cache_line(write_line_index) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
     }
   }
+  // finish filling
+  when(d_refill_done){
+    refilling := false.B
+    tag := refill_tag
+    when(!invalidated){
+      line_valid := true.B
+    }
+  }
 
   // configure tilelink
   // request new data from mem
-  tl_out.a.valid := s1_request_refill
+  tl_out.a.valid := s2_request_refill
   tl_out.a.bits := edge_out.Get(
     fromSource = UInt(0),
-    toAddress = (s1_paddr >> blockOffBits) << blockOffBits,
+    toAddress = (s2_paddr >> blockOffBits) << blockOffBits,
     // seems to not support smaller blocks
     lgSize = lgCacheBlockBytes)._2
   tl_out.d.ready := true.B
@@ -187,14 +196,15 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   tl_out.e.valid := Bool(false)
 
   //configure IO
-  // only be ready when no refill is in progress
-  io.req.ready := !refilling && !s1_request_refill
+  // only be ready when no refill data is being written
+  io.req.ready := !mem_response_present
   io.resp.valid := s2_tag_match && s2_valid && line_valid
   io.resp.bits.data := cache_line(s2_line_index)
+  // not entirely sure what those do
   io.resp.bits.ae := false.B
   io.resp.bits.replay := false.B
   io.keep_clock_enabled := true.B
-  io.perf.acquire := s1_request_refill
+  io.perf.acquire := s2_request_refill
 }
 
 class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){

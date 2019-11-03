@@ -23,11 +23,13 @@ lazy val commonSettings = Seq(
 lazy val chisel = (project in file("chisel3")).settings(commonSettings)
 lazy val hardfloat  = project.dependsOn(chisel).settings(commonSettings)
   .settings(crossScalaVersions := Seq("2.11.12", "2.12.4"))
+//lazy val `chisel-testers` = (project in file("chisel-testers")).dependsOn(chisel).settings(commonSettings)
+//  .settings(publishArtifact := false)
 lazy val macros = (project in file("macros")).settings(commonSettings)
 lazy val rocketchip = (project in file("."))
   .settings(commonSettings, chipSettings)
-  .dependsOn(chisel, hardfloat, macros)
-  .aggregate(chisel, hardfloat, macros) // <-- means the running task on rocketchip is also run by aggregate tasks
+  .dependsOn(chisel, hardfloat, macros /*,`chisel-testers`*/)
+  .aggregate(chisel, hardfloat, macros /*,`chisel-testers`*/) // <-- means the running task on rocketchip is also run by aggregate tasks
 
 lazy val addons = settingKey[Seq[String]]("list of addons used for this build")
 lazy val make = inputKey[Unit]("trigger backend-specific makefile command")

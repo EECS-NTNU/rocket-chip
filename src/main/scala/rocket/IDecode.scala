@@ -49,14 +49,14 @@ class IntCtrlSigs extends Bundle {
   val dp = Bool()
 
   def default: List[BitPat] =
-                //           jal                                                                   renf1             fence.i
-                //   val     | jalr                                                                | renf2           |
-                //   | fp_val| | renx2                                                             | | renf3         |
-                //   | | rocc| | | renx1       s_alu1                          mem_val             | | | wfd         | 
-                //   | | | br| | | |   s_alu2  |       imm    dw     alu       | mem_cmd   mem_type| | | | mul       | 
-                //   | | | | | | | |   |       |       |      |      |         | |           |     | | | | | div     | fence
-                //   | | | | | | | |   |       |       |      |      |         | |           |     | | | | | | wxd   | | amo
-                //   | | | | | | | | scie      |       |      |      |         | |           |     | | | | | | |     | | | dp
+                //           jal                                                                   renf1               fence.i
+                //   val     | jalr                                                                | renf2             |
+                //   | fp_val| | renx2                                                             | | renf3           |
+                //   | | rocc| | | renx1       s_alu1                          mem_val             | | | wfd           |
+                //   | | | br| | | |   s_alu2  |       imm    dw     alu       | mem_cmd   mem_type| | | | mul         |
+                //   | | | | | | | |   |       |       |      |      |         | |           |     | | | | | div       | fence
+                //   | | | | | | | |   |       |       |      |      |         | |           |     | | | | | | wxd     | | amo
+                //   | | | | | | | | scie      |       |      |      |         | |           |     | | | | | | |       | | | dp
                 List(N,X,X,X,X,X,X,X,X,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        MT_X, X,X,X,X,X,X,X,CSR.X,X,X,X,X)
 
   def decode(inst: UInt, table: Iterable[(BitPat, List[BitPat])]) = {

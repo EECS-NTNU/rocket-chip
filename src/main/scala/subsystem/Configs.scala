@@ -56,6 +56,27 @@ class WithNBigCores(n: Int) extends Config((site, here, up) => {
   }
 })
 
+class WithNBigNaiveCores(n: Int) extends Config((site, here, up) => {
+  case RocketTilesKey => {
+    val big = RocketTileParams(
+      core   = RocketCoreParams(mulDiv = Some(MulDivParams(
+        mulUnroll = 8,
+        mulEarlyOut = true,
+        divEarlyOut = true))),
+      dcache = Some(DCacheParams(
+        rowBits = site(SystemBusKey).beatBits,
+        nMSHRs = 0,
+        blockBytes = site(CacheBlockBytes))),
+      icache = Some(ICacheParams(
+        naiveCache = true,
+//        nSets = 2,
+//        nWays = 1,
+        rowBits = site(SystemBusKey).beatBits,
+        blockBytes = site(CacheBlockBytes))))
+    List.tabulate(n)(i => big.copy(hartId = i))
+  }
+})
+
 class WithNSmallCores(n: Int) extends Config((site, here, up) => {
   case RocketTilesKey => {
     val small = RocketTileParams(
