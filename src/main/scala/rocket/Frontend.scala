@@ -21,10 +21,10 @@ class FrontendReq(implicit p: Parameters) extends CoreBundle()(p) {
 }
 
 class FrontendExceptions extends Bundle {
-  val pf = new Bundle {
+  val pf = new Bundle { //page fault
     val inst = Bool()
   }
-  val ae = new Bundle {
+  val ae = new Bundle { //acess exception??
     val inst = Bool()
   }
 }
@@ -94,8 +94,6 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
   icache.io.clock_enabled := clock_en
   withClock (gated_clock) { // entering gated-clock domain
 
-  val tlb = Module(new TLB(true, log2Ceil(fetchBytes), TLBConfig(nTLBEntries)))
-
   val s0_valid = io.cpu.req.valid || !fq.io.mask(fq.io.mask.getWidth-3)
   val s1_valid = RegNext(s0_valid)
   val s1_pc = Reg(UInt(width=vaddrBitsExtended))
@@ -105,7 +103,7 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
   val s2_btb_resp_valid = if (usingBTB) Reg(Bool()) else false.B
   val s2_btb_resp_bits = Reg(new BTBResp)
   val s2_btb_taken = s2_btb_resp_valid && s2_btb_resp_bits.taken
-  val s2_tlb_resp = Reg(tlb.io.resp)
+  val s2_tlb_resp = Reg(new TLBResp())
   val s2_xcpt = s2_tlb_resp.ae.inst || s2_tlb_resp.pf.inst
   val s2_speculative = Reg(init=Bool(false))
   val s2_partial_insn_valid = RegInit(false.B)
@@ -135,24 +133,29 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
     s2_valid := !s2_redirect
     s2_pc := s1_pc
     s2_speculative := s1_speculative
-    s2_tlb_resp := tlb.io.resp
+    s2_tlb_resp := icache.io.s1_tlb_resp
   }
 
-  io.ptw <> tlb.io.ptw
-  tlb.io.req.valid := s1_valid && !s2_replay
-  tlb.io.req.bits.vaddr := s1_pc
-  tlb.io.req.bits.passthrough := Bool(false)
-  tlb.io.req.bits.size := log2Ceil(coreInstBytes*fetchWidth)
-  tlb.io.sfence := io.cpu.sfence
-  tlb.io.kill := !s2_valid
+  io.ptw <> icache.io.ptw
+  icache.io.sfence <> io.cpu.sfence
+  icache.io.s2_tlb_replay := s2_replay
+  icache.io.s2_tlb_valid := s2_valid
+
+//  val pseudo_tlb = Wire(icache.tlb.io.cloneType)
+//  pseudo_tlb.req.valid := s1_valid && !s2_replay
+//  pseudo_tlb.req.bits.vaddr := s1_pc
+//  pseudo_tlb.req.bits.passthrough := Bool(false)
+//  pseudo_tlb.req.bits.size := log2Ceil(coreInstBytes*fetchWidth)
+//  pseudo_tlb.sfence := io.cpu.sfence
+//  pseudo_tlb.kill := !s2_valid
+//  dontTouch(pseudo_tlb)
 
   icache.io.hartid := io.hartid
   icache.io.req.valid := s0_valid
   icache.io.req.bits.addr := io.cpu.npc
   icache.io.invalidate := io.cpu.flush_icache
-  icache.io.s1_paddr := tlb.io.resp.paddr
   icache.io.s2_vaddr := s2_pc
-  icache.io.s1_kill := s2_redirect || tlb.io.resp.miss || s2_replay
+  icache.io.s1_kill := s2_redirect || icache.io.s1_tlb_resp.miss || s2_replay
   icache.io.s2_kill := s2_speculative && !s2_tlb_resp.cacheable || s2_xcpt
   icache.io.s2_prefetch := s2_tlb_resp.prefetchable
 
@@ -326,7 +329,7 @@ class FrontendModule(outer: Frontend) extends LazyModuleImp(outer)
   clock_en_reg := io.cpu.might_request || // chicken bit
     icache.io.keep_clock_enabled || // I$ miss or ITIM access
     s1_valid || s2_valid || // some fetch in flight
-    !tlb.io.req.ready || // handling TLB miss
+//    !tlb.io.req.ready || // handling TLB miss
     !fq.io.mask(fq.io.mask.getWidth-1) // queue not full
   } // leaving gated-clock domain
 

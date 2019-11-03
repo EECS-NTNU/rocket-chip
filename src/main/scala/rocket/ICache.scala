@@ -39,7 +39,7 @@ trait HasL1ICacheParameters extends HasL1CacheParameters with HasCoreParameters 
 }
 
 class ICacheReq(implicit p: Parameters) extends CoreBundle()(p) with HasL1ICacheParameters {
-  val addr = UInt(width = vaddrBits)
+  val addr = UInt(width = vaddrBitsExtended)
 }
 
 class ICacheErrors(implicit p: Parameters) extends CoreBundle()(p)
@@ -88,7 +88,7 @@ class ICachePerfEvents extends Bundle {
 class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
   val hartid = UInt(INPUT, hartIdLen)
   val req = Decoupled(new ICacheReq).flip
-  val s1_paddr = UInt(INPUT, paddrBits) // delayed one cycle w.r.t. req
+//  val s1_paddr = UInt(INPUT, paddrBits) // delayed one cycle w.r.t. req
   val s2_vaddr = UInt(INPUT, vaddrBits) // delayed two cycles w.r.t. req
   val s1_kill = Bool(INPUT) // delayed one cycle w.r.t. req
   val s2_kill = Bool(INPUT) // delayed two cycles; prevents I$ miss emission
@@ -102,13 +102,37 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
 
   val clock_enabled = Bool(INPUT)
   val keep_clock_enabled = Bool(OUTPUT)
+  // io for tlb
+  val ptw = new TLBPTWIO()
+  val sfence = Valid(new SFenceReq).asInput
+  val s2_tlb_replay = Input(Bool())
+  val s2_tlb_valid = Input(Bool())
+  val s1_tlb_resp = new TLBResp().asOutput
 }
 class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
   with HasL1ICacheParameters {
   override val cacheParams = outer.icacheParams // Use the local parameters
 
   val io = IO(new ICacheBundle(outer))
+
   val (tl_out, edge_out) = outer.masterNode.out(0)
+
+  // moved tlb into icache
+  implicit val edge: TLEdgeOut = edge_out
+  val tlb = Module(new TLB(true, log2Ceil(fetchBytes), TLBConfig(nTLBEntries)))
+  io.ptw <> tlb.io.ptw
+  val s1_tlb_valid = RegNext(io.req.valid)
+  tlb.io.req.valid := s1_tlb_valid && !io.s2_tlb_replay
+  tlb.io.req.bits.vaddr := RegNext(io.req.bits.addr)
+  tlb.io.req.bits.passthrough := Bool(false)
+  tlb.io.req.bits.size := log2Ceil(coreInstBytes*fetchWidth)
+  tlb.io.sfence <> io.sfence
+  tlb.io.kill := !io.s2_tlb_valid
+  val s1_paddr = WireInit(tlb.io.resp.paddr)
+  io.s1_tlb_resp := tlb.io.resp
+  //we need the one bit extended vaddr for the tlb - get short version here
+  val s0_vaddr = Wire(UInt(vaddrBits.W))
+  s0_vaddr := io.req.bits.addr
 }
 
 
@@ -124,10 +148,8 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val s1_valid = RegNext(s0_valid, false.B) && !io.s1_kill
   val s2_valid = RegNext(s1_valid, false.B) && !io.s2_kill
 
-  val s0_vaddr = WireInit(io.req.bits.addr)
   val s1_vaddr = RegNext(s0_vaddr)
   val s2_vaddr = RegNext(s1_vaddr)
-  val s1_paddr = WireInit(io.s1_paddr)
   val s2_paddr = RegNext(s1_paddr)
 
   val s2_line_index = s2_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
@@ -242,7 +264,7 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
   val s1_valid = Reg(init=Bool(false))
   val s1_tag_hit = Wire(Vec(nWays, Bool()))
-  val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))
+  val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(s1_paddr))
   dontTouch(s1_hit)
   val s2_valid = RegNext(s1_valid && !io.s1_kill, Bool(false))
   val s2_hit = RegNext(s1_hit)
@@ -255,14 +277,13 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val s2_miss = s2_valid && !s2_hit && !io.s2_kill
   val s1_can_request_refill = !(s2_miss || refill_valid)
   val s2_request_refill = s2_miss && RegNext(s1_can_request_refill)
-  val refill_addr = RegEnable(io.s1_paddr, s1_valid && s1_can_request_refill)
+  val refill_addr = RegEnable(s1_paddr, s1_valid && s1_can_request_refill)
   val refill_tag = refill_addr(tagBits+untagBits-1,untagBits)
   val refill_idx = refill_addr(untagBits-1,blockOffBits)
   val refill_one_beat = tl_out.d.fire() && edge_out.hasData(tl_out.d.bits)
 
   io.req.ready := !(refill_one_beat || s0_slaveValid || s3_slaveValid)
   val s0_valid = io.req.fire()
-  val s0_vaddr = io.req.bits.addr
   s1_valid := s0_valid
 
   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
@@ -320,12 +341,12 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val s1s3_slaveData = Reg(UInt(width = wordBits))
 
   for (i <- 0 until nWays) {
-    val s1_idx = io.s1_paddr(untagBits-1,blockOffBits)
-    val s1_tag = io.s1_paddr(tagBits+untagBits-1,untagBits)
+    val s1_idx = s1_paddr(untagBits-1,blockOffBits)
+    val s1_tag = s1_paddr(tagBits+untagBits-1,untagBits)
     val scratchpadHit = scratchpadWayValid(i) &&
       Mux(s1_slaveValid,
         lineInScratchpad(scratchpadLine(s1s3_slaveAddr)) && scratchpadWay(s1s3_slaveAddr) === i,
-        addrInScratchpad(io.s1_paddr) && scratchpadWay(io.s1_paddr) === i)
+        addrInScratchpad(s1_paddr) && scratchpadWay(s1_paddr) === i)
     val s1_vb = vb_array(Cat(UInt(i), s1_idx)) && !s1_slaveValid
     val enc_tag = tECC.decode(tag_rdata(i))
     val (tl_error, tag) = Split(enc_tag.uncorrected, tagBits)
@@ -363,7 +384,7 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
       data_array.write(mem_idx, Vec.fill(nWays)(dECC.encode(data)), (0 until nWays).map(way === _))
     }
     val dout = data_array.read(mem_idx, !wen && s0_ren)
-    when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, io.s1_paddr))) {
+    when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, s1_paddr))) {
       s1_dout := dout
     }
   }
@@ -381,7 +402,7 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val s2_disparity = s2_tag_disparity || s2_data_decoded.error
   val s2_full_word_write = Wire(init = false.B)
 
-  val s1_scratchpad_hit = Mux(s1_slaveValid, lineInScratchpad(scratchpadLine(s1s3_slaveAddr)), addrInScratchpad(io.s1_paddr))
+  val s1_scratchpad_hit = Mux(s1_slaveValid, lineInScratchpad(scratchpadLine(s1s3_slaveAddr)), addrInScratchpad(s1_paddr))
   val s2_scratchpad_hit = RegEnable(s1_scratchpad_hit, s1_clk_en)
   val s2_report_uncorrectable_error = s2_scratchpad_hit && s2_data_decoded.uncorrectable && (s2_valid || (s2_slaveValid && !s2_full_word_write))
   val s2_error_addr = scratchpadBase.map(base => Mux(s2_scratchpad_hit, base + s2_scratchpad_word_addr, 0.U)).getOrElse(0.U)
@@ -529,7 +550,7 @@ class ICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   io.perf.acquire := refill_fire
   io.keep_clock_enabled :=
     tl_in.map(tl => tl.a.valid || tl.d.valid || s1_slaveValid || s2_slaveValid || s3_slaveValid).getOrElse(false.B) || // ITIM
-    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding // I$
+    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding || !tlb.io.req.ready// I$
 
   ccover(!send_hint && (tl_out.a.valid && !tl_out.a.ready), "MISS_A_STALL", "I$ miss blocked by A-channel")
   ccover(invalidate && refill_valid, "FLUSH_DURING_MISS", "I$ flushed during miss")
@@ -590,14 +611,13 @@ class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
   val s2_miss = s2_valid && !s2_hit && !io.s2_kill
   val s1_can_request_refill = !(s2_miss || refill_valid)
   val s2_request_refill = s2_miss && RegNext(s1_can_request_refill)
-  val refill_addr = RegEnable(io.s1_paddr, s1_valid && s1_can_request_refill)
+  val refill_addr = RegEnable(s1_paddr, s1_valid && s1_can_request_refill)
   val refill_tag = refill_addr(tagBits+untagBits-1,untagBits)
   val refill_idx = refill_addr(untagBits-1,blockOffBits)
   val refill_one_beat = tl_out.d.fire() && edge_out.hasData(tl_out.d.bits)
 
   io.req.ready := !(refill_one_beat)
   val s0_valid = io.req.fire()
-  val s0_vaddr = io.req.bits.addr
   s1_valid := s0_valid
 
   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
@@ -646,8 +666,8 @@ class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
 
 
   for (i <- 0 until nWays) {
-    val s1_idx = io.s1_paddr(untagBits-1,blockOffBits)
-    val s1_tag = io.s1_paddr(tagBits+untagBits-1,untagBits)
+    val s1_idx = s1_paddr(untagBits-1,blockOffBits)
+    val s1_tag = s1_paddr(tagBits+untagBits-1,untagBits)
     val s1_vb = vb_array(Cat(UInt(i), s1_idx))
     val enc_tag = tECC.decode(tag_rdata(i))
     val (tl_error, tag) = Split(enc_tag.uncorrected, tagBits)
@@ -682,7 +702,7 @@ class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
       data_array.write(mem_idx, Vec.fill(nWays)(dECC.encode(data)), (0 until nWays).map(way === _))
     }
     val dout = data_array.read(mem_idx, !wen && s0_ren)
-    when (wordMatch(io.s1_paddr)) {
+    when (wordMatch(s1_paddr)) {
       s1_dout := dout
     }
   }
@@ -768,7 +788,7 @@ class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
 
   io.perf.acquire := refill_fire
   io.keep_clock_enabled :=
-    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding // I$
+    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding || !tlb.io.req.ready// I$
 
   ccover(!send_hint && (tl_out.a.valid && !tl_out.a.ready), "MISS_A_STALL", "I$ miss blocked by A-channel")
   ccover(invalidate && refill_valid, "FLUSH_DURING_MISS", "I$ flushed during miss")

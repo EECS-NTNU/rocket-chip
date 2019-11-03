@@ -61,6 +61,6 @@ run-fast: run-asm-tests-fast run-bmark-tests-fast
 .PHONY: run run-debug run-fast
 
 %-$(PROJECT)-$(CONFIG)-debug.vcd: $(output_dir)/% $(emu_debug)
-	./$(emu_debug) +max-cycles=300000 +verbose -v$@ $< $(disasm) $(patsubst %.vcd,%.out,$@) && [ $$PIPESTATUS -eq 0 ]
+	./$(emu_debug) +max-cycles=500000 +verbose -v$@ $< $(disasm) $(patsubst %.vcd,%.out,$@) && [ $$PIPESTATUS -eq 0 ]
 test: rv64um-v-mul-$(PROJECT)-$(CONFIG)-debug.vcd
 .PHONY: test
