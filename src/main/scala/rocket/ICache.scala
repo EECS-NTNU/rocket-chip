@@ -119,7 +119,7 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   // moved tlb into icache
   implicit val edge: TLEdgeOut = edge_out
-  val tlb = Module(new TLB(true, log2Ceil(fetchBytes), TLBConfig(nTLBEntries)))
+  val tlb: BaseTLB = Module(new NaiveITLB(log2Ceil(fetchBytes), TLBConfig(nTLBEntries)))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
   tlb.io.req.valid := s1_tlb_valid && !io.s2_tlb_replay
