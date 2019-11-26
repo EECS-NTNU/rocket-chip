@@ -119,7 +119,10 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   // moved tlb into icache
   implicit val edge: TLEdgeOut = edge_out
-  val tlb: BaseTLB = Module(new NaiveITLB(log2Ceil(fetchBytes), TLBConfig(nTLBEntries)))
+  val tlb: BaseTLB = Module(new SimplifiedITLB(log2Ceil(fetchBytes),
+//    TLBConfig(nTLBEntries),
+    TLBConfig(6, 2),
+    cacheBlockBytes))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
   tlb.io.req.valid := s1_tlb_valid && !io.s2_tlb_replay
@@ -140,6 +143,8 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
 class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val wordBits = outer.icacheParams.fetchBytes*8
   val wordsPerBeat = tl_out.d.bits.getWidth/wordBits
+  val tlbWays = tlb.asInstanceOf[SimplifiedITLB].tlbWays
+  val tlc = tlb.asInstanceOf[SimplifiedITLB].tlc_io
   require(tl_out.d.bits.data.getWidth%wordBits == 0)
   require(outer.icacheParams.latency == 2)
 
@@ -152,26 +157,36 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val s2_vaddr = RegNext(s1_vaddr)
   val s2_paddr = RegNext(s1_paddr)
 
-  val s2_line_index = s2_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
+  val s1_line_index = s1_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
 
   val s1_ptag = WireInit(s1_paddr >> blockOffBits)
   val s2_ptag = RegNext(s1_ptag)
-  val s2_tag_match = Wire(Bool())//RegNext(s1_tag_match)
+  val s2_in_cache = RegNext(tlc.inCache)//RegNext(s1_tag_match)
 
   // cache data structue
-  val line_valid = RegInit(false.B)
+//  val line_valid = RegInit(false.B)
   val refilling = RegInit(false.B)
-  val s2_request_refill = s2_valid && !refilling && (!s2_tag_match || !line_valid)
-  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
-  val cache_line = Reg(Vec(cacheBlockBytes*8/wordBits, UInt(wordBits.W)))
-  val tag = RegInit(0.U)
+  val s2_request_refill = s2_valid && !refilling && !s2_in_cache
+//  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
+  val refill_vaddr = RegEnable(s2_vaddr, s2_request_refill)
+  val refill_tlb_bp = RegEnable(RegNext(tlc.cacheBackPointer), s2_request_refill)
+  val cache_line = SeqMem(cacheBlockBytes*8/wordBits*nSets*nWays, UInt(wordBits.W))
+  val back_pointer = SeqMem(nSets*nWays, UInt(wordBits.W))
+//  val tag = RegInit(0.U)
 
   // refill signals
   val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
   val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
   val invalidated = RegInit(false.B)
 
-  s2_tag_match := tag === s2_ptag
+
+  // way signals
+  val s1_cache_set = s1_paddr(log2Ceil(cacheBlockBytes)+ log2Up(nSets)-1, log2Ceil(cacheBlockBytes))
+  val s1_cache_idx = Cat(tlc.cacheWay, s1_cache_set, s1_line_index)
+  val refill_way = RegEnable(RegNext(tlc.cacheWay), s2_request_refill)
+  val refill_set = RegEnable(RegNext(s1_cache_set), s2_request_refill)
+  val new_way = LFSR16(s2_request_refill)(log2Up(nWays)-1,0)
+
   // equivalent to tl_out.a.ready && s2_request_refill - we need to check if tl a is ready
   when(tl_out.a.fire()){
     refilling := true.B
@@ -180,27 +195,34 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   when(!refilling){
     invalidated := false.B
   }
+  tlc.invalidateAll := false
   when(io.invalidate){
-    line_valid := false.B
+    tlc.invalidateAll := true
     invalidated := true.B
   }
 
   // refill logic
   // fill vector
   when(mem_response_present) {
-    line_valid := false.B
+//    line_valid := false.B
+//    TODO: invalidate line at bp - maybe also earlier
     for (i <- 0 until wordsPerBeat) {
       val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
       val write_line_index = Cat(d_refill_cnt, beatIdx)
-      cache_line(write_line_index) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
+      val write_idx = Cat(refill_way, refill_set, write_line_index)
+      cache_line(write_idx) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
     }
   }
+  tlc.insert.line := false
+  tlc.insert.address := refill_vaddr
+  tlc.insert.tlbBP := refill_tlb_bp
+  tlc.insert.cacheWay := new_way
   // finish filling
   when(d_refill_done){
     refilling := false.B
-    tag := refill_tag
+//    tag := refill_tag
     when(!invalidated){
-      line_valid := true.B
+      tlc.insert.line := true
     }
   }
 
@@ -209,7 +231,7 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   tl_out.a.valid := s2_request_refill
   tl_out.a.bits := edge_out.Get(
     fromSource = UInt(0),
-    toAddress = (s2_paddr >> blockOffBits) << blockOffBits,
+    toAddress = ((s2_paddr >> blockOffBits) << blockOffBits).asUInt(),
     // seems to not support smaller blocks
     lgSize = lgCacheBlockBytes)._2
   tl_out.d.ready := true.B
@@ -220,8 +242,8 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   //configure IO
   // only be ready when no refill data is being written
   io.req.ready := !mem_response_present
-  io.resp.valid := s2_tag_match && s2_valid && line_valid
-  io.resp.bits.data := cache_line(s2_line_index)
+  io.resp.valid := s2_valid && s2_in_cache
+  io.resp.bits.data := cache_line(s1_cache_idx)
   // not entirely sure what those do
   io.resp.bits.ae := false.B
   io.resp.bits.replay := false.B
