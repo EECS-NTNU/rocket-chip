@@ -31,7 +31,6 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
   val tlc_io = IO(new Bundle {
     import chisel3._
     val cacheBackPointer = Output(new TlbBackPointer())
-    //    TODO: need both cache set and way
     val cacheWay = Output(UInt())
     val inCache = Output(Bool())
     val insert = new Bundle {
@@ -271,9 +270,26 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     newEntry.fragmented_superpage := io.ptw.resp.bits.fragmented_superpage
 
     when (special_entry.nonEmpty && !io.ptw.resp.bits.homogeneous) {
+      when (io.ptw.resp.bits.level < pgLevels-1) {
+        // handle inserting superpage fractions here
+        newEntry.fragmented_superpage := true.B
+        val ppn = Wire(Vec(pgLevels-1, UInt(pgLevelBits.W)))
+        for (j <- 1 until pgLevels) {
+          val base = (pgLevels - j - 1) * pgLevelBits
+          when(io.ptw.resp.bits.level < j) {
+            ppn(j-1) := r_refill_tag(base+pgLevelBits-1, base)
+          } .otherwise{
+            ppn(j-1) := pte.ppn(base+pgLevelBits-1, base)
+          }
+        }
+        val ppnTop = pte.ppn(ppnBits-1, (pgLevels-1)*pgLevelBits)::Nil
+        newEntry.ppn := Cat(ppnTop ++ ppn)
+        superpage_insert := true.B
+      }
       special_entry.foreach(_.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry))
       special_page_insert := true.B
-      assert(io.ptw.resp.bits.level === pgLevels-1, "special pages are cureently not fractioned")
+//      assert(io.ptw.resp.bits.level === pgLevels-1, "special pages are cureently not fractioned")
+
 //    }.elsewhen (io.ptw.resp.bits.level < pgLevels-1) {
 //      for ((e, i) <- superpage_entries.zipWithIndex) when (r_superpage_repl_addr === i) {
 //        e.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry)
@@ -293,18 +309,12 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
         }
         val ppnTop = pte.ppn(ppnBits-1, (pgLevels-1)*pgLevelBits)::Nil
         newEntry.ppn := Cat(ppnTop ++ ppn)
-//        var res = pte.ppn >> pgLevelBits*(pgLevels - 1)
-//        for (j <- 1 until pgLevels) {
-//          val ignore = io.ptw.resp.bits.level < j
-//          res = Cat(res, (Mux(ignore, vpn, 0.U) | pte.ppn)(vpnBits - j*pgLevelBits - 1, vpnBits - (j + 1)*pgLevelBits))
-//        }
-//        newEntry.ppn := res
         superpage_insert := true.B
       }
       val waddr = Mux(r_sectored_hit, r_sectored_hit_addr, r_sectored_repl_addr)
       for ((e, i) <- sectored_entries.zipWithIndex) when (waddr === i) {
         when (!r_sectored_hit) { e.invalidate() }
-        e.insert(vpn, 0.U, newEntry)
+        e.insert(r_refill_tag, 0.U, newEntry)
       }
     }
   }
