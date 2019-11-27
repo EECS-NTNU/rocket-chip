@@ -5,7 +5,7 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import chisel3.core.{Input, Output, WireInit}
+import chisel3.core.{Input, Output, VecInit, WireInit}
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
@@ -121,7 +121,7 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
   implicit val edge: TLEdgeOut = edge_out
   val tlb: BaseTLB = Module(new SimplifiedITLB(log2Ceil(fetchBytes),
 //    TLBConfig(nTLBEntries),
-    TLBConfig(6, 2),
+    TLBConfig(28, 4),
     cacheBlockBytes))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
@@ -142,11 +142,14 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
 // a naive ICache implementation, that fetches from memory almost all the time (1 cache line)
 class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val wordBits = outer.icacheParams.fetchBytes*8
+  val wordBytes = outer.icacheParams.fetchBytes
   val wordsPerBeat = tl_out.d.bits.getWidth/wordBits
   val tlbWays = tlb.asInstanceOf[SimplifiedITLB].tlbWays
   val tlc = tlb.asInstanceOf[SimplifiedITLB].tlc_io
   require(tl_out.d.bits.data.getWidth%wordBits == 0)
   require(outer.icacheParams.latency == 2)
+  require(log2Ceil(cacheBlockBytes)+ log2Ceil(nSets) == pgIdxBits)
+
 
   // cycle signals
   val s0_valid = WireInit(io.req.fire())
@@ -170,8 +173,8 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 //  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
   val refill_vaddr = RegEnable(s2_vaddr, s2_request_refill)
   val refill_tlb_bp = RegEnable(RegNext(tlc.cacheBackPointer), s2_request_refill)
-  val cache_line = SeqMem(cacheBlockBytes*8/wordBits*nSets*nWays, UInt(wordBits.W))
-  val back_pointer = SeqMem(nSets*nWays, UInt(wordBits.W))
+  val cache_line = SeqMem(cacheBlockBytes/wordBytes*nSets*nWays, UInt(wordBits.W))
+  val back_pointer = SeqMem(nSets*nWays, tlc.cacheBackPointer.cloneType)
 //  val tag = RegInit(0.U)
 
   // refill signals
@@ -181,48 +184,68 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
 
   // way signals
-  val s1_cache_set = s1_paddr(log2Ceil(cacheBlockBytes)+ log2Up(nSets)-1, log2Ceil(cacheBlockBytes))
+  val s1_cache_set = s1_paddr(log2Ceil(cacheBlockBytes)+ log2Ceil(nSets)-1, log2Ceil(cacheBlockBytes))
+  val s2_cache_set = RegNext(s1_cache_set)
   val s1_cache_idx = Cat(tlc.cacheWay, s1_cache_set, s1_line_index)
-  val refill_way = RegEnable(RegNext(tlc.cacheWay), s2_request_refill)
-  val refill_set = RegEnable(RegNext(s1_cache_set), s2_request_refill)
-  val new_way = LFSR16(s2_request_refill)(log2Up(nWays)-1,0)
+  val s2_cache_way = RegNext(tlc.cacheWay)
+//  val refill_way = RegEnable(s2_cache_way, s2_request_refill)
+  val refill_set = RegEnable(s2_cache_set, s2_request_refill)
+  val s2_new_way = LFSR16(s2_request_refill)(log2Up(nWays)-1,0)
+  val refill_way = RegEnable(s2_new_way, s2_request_refill)
 
   // equivalent to tl_out.a.ready && s2_request_refill - we need to check if tl a is ready
+  val s3_previous_bp = Wire(tlc.cacheBackPointer.cloneType)
+  s3_previous_bp := back_pointer(Cat(s2_new_way, s2_cache_set))
+  // refill request (s2)
   when(tl_out.a.fire()){
     refilling := true.B
+  }
+  tlc.invalidate.single := false
+  tlc.invalidate.singleBP := s3_previous_bp
+  tlc.invalidate.singleCacheSet := refill_set
+  // cycle after refill request (s3)
+  when(RegNext(tl_out.a.fire())){
+    tlc.invalidate.single := true
   }
   // invalidation logic - we don't want a cache line that is being loaded to be valid after invalidation
   when(!refilling){
     invalidated := false.B
   }
-  tlc.invalidateAll := false
+  tlc.invalidate.all := false
   when(io.invalidate){
-    tlc.invalidateAll := true
+    tlc.invalidate.all := true
     invalidated := true.B
   }
 
+  val write_indices = WireInit(VecInit(Seq.fill(wordsPerBeat)(0.U((log2Ceil(nWays)+log2Ceil(nSets)+log2Ceil(cacheBlockBytes/wordBytes)).W))))
+  val write_line_indices = WireInit(VecInit(Seq.fill(wordsPerBeat)(0.U(log2Ceil(cacheBlockBytes/wordBytes).W))))
+  dontTouch(write_indices)
+  dontTouch(write_line_indices)
   // refill logic
   // fill vector
   when(mem_response_present) {
 //    line_valid := false.B
-//    TODO: invalidate line at bp - maybe also earlier
+
     for (i <- 0 until wordsPerBeat) {
       val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
-      val write_line_index = Cat(d_refill_cnt, beatIdx)
+//      TODO: FIX!!!!!!!
+      val write_line_index = Cat(d_refill_cnt(log2Ceil(cacheBlockBytes/wordsPerBeat/wordBytes)-1, 0), beatIdx)
       val write_idx = Cat(refill_way, refill_set, write_line_index)
+      write_indices(i) := write_idx
+      write_line_indices(i) := write_line_index
       cache_line(write_idx) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
     }
   }
-  tlc.insert.line := false
+  tlc.insert.enable := false
   tlc.insert.address := refill_vaddr
   tlc.insert.tlbBP := refill_tlb_bp
-  tlc.insert.cacheWay := new_way
+  tlc.insert.cacheWay := refill_way
   // finish filling
   when(d_refill_done){
     refilling := false.B
-//    tag := refill_tag
+    back_pointer(Cat(refill_way, refill_set)) := refill_tlb_bp
     when(!invalidated){
-      tlc.insert.line := true
+      tlc.insert.enable := true
     }
   }
 

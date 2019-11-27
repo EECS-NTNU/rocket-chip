@@ -12,28 +12,45 @@ import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 import chisel3.internal.sourceinfo.SourceInfo
 
+
 class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BaseTLB(
   lgMaxSize = lgMaxSize,
   cfg = cfg,
 )(edge, p) {
   val instruction = true
+  val pageGranularityPMPs = pmpGranularity >= (1 << pgIdxBits)
+  val tlbWays = cfg.nEntries / cfg.nSectors
+  val basePgSize = (1 << pgIdxBits)
+  require(isPow2(cacheBlockBytes) && isPow2(basePgSize) && basePgSize >= cacheBlockBytes)
+
+  class TlbBackPointer extends Bundle{
+    val set = UInt(log2Ceil(cfg.nSectors).W)
+    val way = UInt(log2Ceil(tlbWays).W)
+  }
+
   val tlc_io = IO(new Bundle {
     import chisel3._
-    val cacheBackPointer = Output(UInt())
+    val cacheBackPointer = Output(new TlbBackPointer())
     //    TODO: need both cache set and way
     val cacheWay = Output(UInt())
     val inCache = Output(Bool())
     val insert = new Bundle {
-      val line = Input(Bool())
+      val enable = Input(Bool())
       val address = Input(UInt())
-      val tlbBP = Input(UInt())
+      val tlbBP = Input(new TlbBackPointer())
       val cacheWay = Input(UInt())
     }
-    val invalidateAll = Input(Bool())
+
+    val invalidate = new Bundle {
+      val all = Input(Bool())
+      val single = Input(Bool())
+      val singleBP = Input(new TlbBackPointer())
+      val singleCacheSet = Input(UInt())
+    }
   })
 
-  val basePgSize = (1 << pgIdxBits)
-  require(isPow2(cacheBlockBytes) && isPow2(basePgSize) && basePgSize >= cacheBlockBytes)
+
+
 
   class Entry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boolean) extends Bundle {
     require(nSectors == 1 || !superpage)
@@ -98,6 +115,10 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
       line_way(tlb_set)(lineIdx(page_offset)) := cache_way
     }
 
+    def invalidateLine(tlb_set: UInt, cache_set: UInt): Unit = {
+      line_valid(tlb_set)(cache_set) := false
+    }
+
     def insert(tag: UInt, level: UInt, entry: EntryData) {
       this.tag := tag
       this.level := level.extract(log2Ceil(pgLevels - superpageOnly.toInt)-1, 0)
@@ -111,10 +132,10 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
     def invalidate() {
       valid.foreach(_ := false)
-      invalidateLine()
+      invalidateLines()
     }
 
-    def invalidateLine(): Unit = {
+    def invalidateLines(): Unit = {
       line_valid.foreach(_.foreach(_:= false))    }
 
     def invalidateSingle(nr: UInt): Unit ={
@@ -141,8 +162,6 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     }
   }
 
-  val pageGranularityPMPs = pmpGranularity >= (1 << pgIdxBits)
-  val tlbWays = cfg.nEntries / cfg.nSectors
   val sectored_entries = Reg(Vec(tlbWays, new Entry(cfg.nSectors, false, false)))
 //  val superpage_entries = Reg(Vec(cfg.nSuperpageEntries, new Entry(1, true, true)))
   val special_entry = (!pageGranularityPMPs).option(Reg(new Entry(1, true, false)))
@@ -192,25 +211,35 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
   val sector_hits = sectored_entries.map(_.sectorHit(vpn))
 
-  when(tlc_io.insert.line){
+  when(tlc_io.insert.enable){
     val vpn = tlc_io.insert.address(vaddrBits-1, pgIdxBits)
     val page_offset = tlc_io.insert.address(pgIdxBits-1, 0)
-    val tlb_set = tlc_io.insert.tlbBP(log2Ceil(tlbWays)+log2Ceil(cfg.nSectors)-1, log2Ceil(tlbWays))
-    val tlb_way = tlc_io.insert.tlbBP(log2Ceil(tlbWays)-1, 0)
+    val tlb_set = tlc_io.insert.tlbBP.set
+    val tlb_way = tlc_io.insert.tlbBP.way
     when(tlb_way === tlbWays){
-      special_entry.foreach(_.insertLine(vpn, page_offset, tlc_io.insert.cacheWay))
+      special_entry.foreach(_.insertLine(tlb_set, page_offset, tlc_io.insert.cacheWay))
     }.otherwise{
-      sectored_entries(tlb_way).insertLine(vpn, page_offset, tlc_io.insert.cacheWay)
+      sectored_entries(tlb_way).insertLine(tlb_set, page_offset, tlc_io.insert.cacheWay)
     }
   }
-  when(tlc_io.invalidateAll){
-    all_entries.foreach(_.invalidateLine())
+  when(tlc_io.invalidate.all){
+    all_entries.foreach(_.invalidateLines())
+  }
+  when(tlc_io.invalidate.single){
+    val tlb_set = tlc_io.invalidate.singleBP.set
+    val tlb_way = tlc_io.invalidate.singleBP.way
+    when(tlb_way === tlbWays){
+      special_entry.foreach(_.invalidateLine(tlb_set, tlc_io.invalidate.singleCacheSet))
+    }.otherwise{
+      sectored_entries(tlb_way).invalidateLine(tlb_set, tlc_io.invalidate.singleCacheSet)
+    }
   }
   // TODO: check that OH for special_entry is actually cfg.nSectors
   val sh = sectored_entries.map(vm_enabled && _.hit(vpn))++special_entry.map(_.hit(vpn))
   val sector = Mux1H(sh, all_entries.map(_.sectorIdx(vpn)))
   val way = OHToUInt(sh.asUInt)
-  tlc_io.cacheBackPointer := Cat(sector, way)
+  tlc_io.cacheBackPointer.set := sector
+  tlc_io.cacheBackPointer.way := way
   tlc_io.cacheWay := Mux1H(sh, all_entries.map(_.getWay(vpn, io.req.bits.vaddr(pgIdxBits-1, 0))))
   tlc_io.inCache := Mux1H(sh, all_entries.map(_.inCache(vpn, io.req.bits.vaddr(pgIdxBits-1, 0))))
 
@@ -244,6 +273,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     when (special_entry.nonEmpty && !io.ptw.resp.bits.homogeneous) {
       special_entry.foreach(_.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry))
       special_page_insert := true.B
+      assert(io.ptw.resp.bits.level === pgLevels-1, "special pages are cureently not fractioned")
 //    }.elsewhen (io.ptw.resp.bits.level < pgLevels-1) {
 //      for ((e, i) <- superpage_entries.zipWithIndex) when (r_superpage_repl_addr === i) {
 //        e.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry)
@@ -360,7 +390,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
   // handle miss in physical mode
   when(tlb_miss && !vm_enabled){
-    special_entry.foreach(_.insert(r_refill_tag, (pgLevels-1).U, newEntry))
+    special_entry.foreach(_.insert(vpn, (pgLevels-1).U, newEntry))
     special_page_insert := true.B
   }
 
