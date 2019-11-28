@@ -46,6 +46,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
       val singleBP = Input(new TlbBackPointer())
       val singleCacheSet = Input(UInt())
     }
+    val invalidateRefill = Output(Bool())
   })
 
 
@@ -241,6 +242,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
   tlc_io.cacheBackPointer.way := way
   tlc_io.cacheWay := Mux1H(sh, all_entries.map(_.getWay(vpn, io.req.bits.vaddr(pgIdxBits-1, 0))))
   tlc_io.inCache := Mux1H(sh, all_entries.map(_.inCache(vpn, io.req.bits.vaddr(pgIdxBits-1, 0))))
+  tlc_io.invalidateRefill := false
 
 //  val superpage_hits = superpage_entries.map(_.hit(vpn))
   val hitsVec = all_entries.map(vm_enabled && _.hit(vpn))
@@ -268,6 +270,8 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     newEntry.paa := prot_aa
     newEntry.eff := prot_eff
     newEntry.fragmented_superpage := io.ptw.resp.bits.fragmented_superpage
+
+    tlc_io.invalidateRefill := true
 
     when (special_entry.nonEmpty && !io.ptw.resp.bits.homogeneous) {
       when (io.ptw.resp.bits.level < pgLevels-1) {
@@ -434,13 +438,16 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
           .elsewhen (io.sfence.bits.rs2) { e.invalidateNonGlobal() }
           .otherwise { e.invalidate() }
       }
+      tlc_io.invalidateRefill := true
     }
     when (multipleHits || reset) {
       all_entries.foreach(_.invalidate())
+      tlc_io.invalidateRefill := true
     }
     // flush special_entry on vm state change
     when(vm_changed){
       special_entry.foreach(_.invalidate())
+      tlc_io.invalidateRefill := true
     }
 
     ccover(io.ptw.req.fire(), "MISS", "TLB miss")

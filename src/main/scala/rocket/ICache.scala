@@ -171,7 +171,7 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   // cache data structue
 //  val line_valid = RegInit(false.B)
   val refilling = RegInit(false.B)
-  val s2_request_refill = s2_valid && !refilling && !s2_in_cache
+  val s2_request_refill = s2_valid && !refilling && !s2_in_cache && !tlc.invalidateRefill && !RegNext(tlc.invalidateRefill)
 //  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
   val refill_vaddr = RegEnable(s2_vaddr, s2_request_refill)
   val refill_tlb_bp = RegEnable(RegNext(tlc.cacheBackPointer), s2_request_refill)
@@ -182,7 +182,7 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   // refill signals
   val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
   val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
-  val invalidated = RegInit(false.B)
+  val refill_invalidated = RegInit(false.B)
 
 
   // way signals
@@ -202,6 +202,9 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   when(tl_out.a.fire()){
     refilling := true.B
   }
+  when(refilling && tlc.invalidateRefill){
+    refill_invalidated := true
+  }
   tlc.invalidate.single := false
   tlc.invalidate.singleBP := s3_previous_bp
   tlc.invalidate.singleCacheSet := refill_set
@@ -211,12 +214,12 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   }
   // invalidation logic - we don't want a cache line that is being loaded to be valid after invalidation
   when(!refilling){
-    invalidated := false.B
+    refill_invalidated := false.B
   }
   tlc.invalidate.all := false
   when(io.invalidate){
     tlc.invalidate.all := true
-    invalidated := true.B
+    refill_invalidated := true.B
   }
 
   val write_indices = WireInit(VecInit(Seq.fill(wordsPerBeat)(0.U((log2Ceil(nWays)+log2Ceil(nSets)+log2Ceil(cacheBlockBytes/wordBytes)).W))))
@@ -245,7 +248,7 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   when(d_refill_done){
     refilling := false.B
     back_pointer(Cat(refill_way, refill_set)) := refill_tlb_bp
-    when(!invalidated){
+    when(!refill_invalidated){
       tlc.insert.enable := true
     }
   }
