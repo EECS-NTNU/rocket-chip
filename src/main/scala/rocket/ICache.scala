@@ -121,8 +121,9 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
   implicit val edge: TLEdgeOut = edge_out
 }
 
-
+import chisel3.experimental.chiselName
 // a naive ICache implementation, that fetches from memory almost all the time (1 cache line)
+@chiselName
 class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val tlb: BaseTLB = Module(new SimplifiedITLB(log2Ceil(fetchBytes),
   //    TLBConfig(nTLBEntries),
@@ -222,21 +223,13 @@ class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
     refill_invalidated := true.B
   }
 
-  val write_indices = WireInit(VecInit(Seq.fill(wordsPerBeat)(0.U((log2Ceil(nWays)+log2Ceil(nSets)+log2Ceil(cacheBlockBytes/wordBytes)).W))))
-  val write_line_indices = WireInit(VecInit(Seq.fill(wordsPerBeat)(0.U(log2Ceil(cacheBlockBytes/wordBytes).W))))
-  dontTouch(write_indices)
-  dontTouch(write_line_indices)
   // refill logic
-  // fill vector
   when(mem_response_present) {
-//    line_valid := false.B
-
     for (i <- 0 until wordsPerBeat) {
       val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
       val write_line_index = Cat(d_refill_cnt(log2Ceil(cacheBlockBytes/wordsPerBeat/wordBytes)-1, 0), beatIdx)
       val write_idx = Cat(refill_way, refill_set, write_line_index)
-      write_indices(i) := write_idx
-      write_line_indices(i) := write_line_index
+
       cache_line(write_idx) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
     }
   }

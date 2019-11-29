@@ -120,10 +120,10 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     }
 
     def insert(tag: UInt, level: UInt, entry: EntryData) {
+      val idx = sectorIdx(tag)
+      assert(sectorTagMatch(tag) || (!(valid.asUInt() & (~(1<<idx))).orR), "suspicious insert")
       this.tag := tag
       this.level := level.extract(log2Ceil(pgLevels - superpageOnly.toInt)-1, 0)
-
-      val idx = sectorIdx(tag)
       // just to make sure...
       line_valid.foreach(_.foreach(_:= false))
       valid(idx) := true
@@ -235,7 +235,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     }
   }
   // TODO: check that OH for special_entry is actually cfg.nSectors
-  val sh = sectored_entries.map(vm_enabled && _.hit(vpn))++special_entry.map(_.hit(vpn))
+  val sh = all_entries.map(_.hit(vpn))
   val sector = Mux1H(sh, all_entries.map(_.sectorIdx(vpn)))
   val way = OHToUInt(sh.asUInt)
   tlc_io.cacheBackPointer.set := sector
@@ -317,7 +317,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
       }
       val waddr = Mux(r_sectored_hit, r_sectored_hit_addr, r_sectored_repl_addr)
       for ((e, i) <- sectored_entries.zipWithIndex) when (waddr === i) {
-        when (!r_sectored_hit) { e.invalidate() }
+        when (!r_sectored_hit) { e.invalidate() } // this is why the shared tag works
         e.insert(r_refill_tag, 0.U, newEntry)
       }
     }
@@ -370,7 +370,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
   val sectored_plru = new PseudoLRU(sectored_entries.size)
 //  val superpage_plru = new PseudoLRU(superpage_entries.size)
-  when (io.req.valid && vm_enabled) {
+  when (io.req.valid /* && vm_enabled*/) {
     when (sector_hits.orR) { sectored_plru.access(OHToUInt(sector_hits)) }
 //    when (superpage_hits.orR) { superpage_plru.access(OHToUInt(superpage_hits)) }
   }
@@ -404,8 +404,16 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
   // handle miss in physical mode
   when(tlb_miss && !vm_enabled){
-    special_entry.foreach(_.insert(vpn, (pgLevels-1).U, newEntry))
-    special_page_insert := true.B
+//    special_entry.foreach(_.insert(vpn, (pgLevels-1).U, newEntry))
+//    special_page_insert := true.B
+    val sectored_repl_addr = replacementEntry(sectored_entries, sectored_plru.replace)
+    val sectored_hit_addr = OHToUInt(sector_hits)
+    val sectored_hit = sector_hits.orR
+    val waddr = Mux(sectored_hit, sectored_hit_addr, sectored_repl_addr)
+    for ((e, i) <- sectored_entries.zipWithIndex) when (waddr === i) {
+      when (!sectored_hit) { e.invalidate() }
+      e.insert(vpn, (pgLevels-1).U, newEntry)
+    }
   }
 
   if (usingVM) {
