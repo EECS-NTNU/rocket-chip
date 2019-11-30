@@ -849,13 +849,22 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
     }
   }
   else {
-    printf("C%d: %d [%d] pc=[%x] W[r%d=%x][%d] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
-         coreMonitorBundle.hartid, coreMonitorBundle.time, coreMonitorBundle.valid,
-         coreMonitorBundle.pc,
-         coreMonitorBundle.wrdst, coreMonitorBundle.wrdata, coreMonitorBundle.wren,
-         coreMonitorBundle.rd0src, coreMonitorBundle.rd0val,
-         coreMonitorBundle.rd1src, coreMonitorBundle.rd1val,
-         coreMonitorBundle.inst, coreMonitorBundle.inst)
+    val instruction_cnt = RegInit(0.U(32.W))
+    val program_started = RegInit(false.B)
+    val program_active = coreMonitorBundle.pc(31)&&coreMonitorBundle.valid // ram is at 0x0080000000
+    when(program_active){
+      program_started := true.B
+    }
+    when(coreMonitorBundle.valid && (program_started || program_active)) {
+      printf("C%d: %d [%d] pc=[%x] W[r%d=%x][%d] R[r%d=%x] R[r%d=%x] inst=[%x] DASM(%x)\n",
+        coreMonitorBundle.hartid, /*coreMonitorBundle.time*/instruction_cnt, coreMonitorBundle.valid,
+        coreMonitorBundle.pc,
+        coreMonitorBundle.wrdst, coreMonitorBundle.wrdata, coreMonitorBundle.wren,
+        coreMonitorBundle.rd0src, coreMonitorBundle.rd0val,
+        coreMonitorBundle.rd1src, coreMonitorBundle.rd1val,
+        coreMonitorBundle.inst, coreMonitorBundle.inst)
+      instruction_cnt := instruction_cnt + 1.U
+    }
   }
 
   PlusArg.timeout(

@@ -3,6 +3,7 @@ package freechips.rocketchip.rocket
 import Chisel._
 import Chisel.ImplicitConversions._
 import chisel3.core.WireInit
+import chisel3.experimental.chiselName
 import freechips.rocketchip.config.{Field, Parameters}
 import freechips.rocketchip.subsystem.CacheBlockBytes
 import freechips.rocketchip.diplomacy.RegionType
@@ -12,7 +13,7 @@ import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 import chisel3.internal.sourceinfo.SourceInfo
 
-
+@chiselName
 class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BaseTLB(
   lgMaxSize = lgMaxSize,
   cfg = cfg,
@@ -121,7 +122,8 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
 
     def insert(tag: UInt, level: UInt, entry: EntryData) {
       val idx = sectorIdx(tag)
-      assert(sectorTagMatch(tag) || (!(valid.asUInt() & (~(1<<idx))).orR), "suspicious insert")
+      // this does not work because the line is invalidated in the same cycle...
+//      assert(sectorTagMatch(tag) || (!(valid.asUInt() & (~(1<<idx))).orR), "suspicious insert")
       this.tag := tag
       this.level := level.extract(log2Ceil(pgLevels - superpageOnly.toInt)-1, 0)
       // just to make sure...
@@ -365,7 +367,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
   val pf_inst_array = ~(x_array | ptw_ae_array)
 
   val tlb_hit = real_hits.orR
-  val phys_hit = WireInit(special_entry.map(_.hit(vpn)).getOrElse(false.B) && !vm_enabled)
+  val phys_hit = WireInit(sectored_entries.map(_.hit(vpn)).orR && !vm_enabled)
   val tlb_miss = !bad_va && !tlb_hit && !phys_hit
 
   val sectored_plru = new PseudoLRU(sectored_entries.size)
@@ -454,6 +456,15 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     }
     // flush special_entry on vm state change
     when(vm_changed){
+      when (state === s_request) {
+        state := s_ready
+      }
+      when (state === s_request && io.ptw.req.ready) {
+        state := s_wait_invalidate
+      }
+      when (state === s_wait) {
+        state := s_wait_invalidate
+      }
       special_entry.foreach(_.invalidate())
       tlc_io.invalidateRefill := true
     }

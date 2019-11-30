@@ -135,7 +135,8 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
 
     def insert(tag: UInt, level: UInt, entry: EntryData) {
       val idx = sectorIdx(tag)
-      assert(sectorTagMatch(tag) || (!(valid.asUInt() & (~(1<<idx))).orR), "suspicious insert")
+      // this does not work because the line is invalidated in the same cycle...
+      //      assert(sectorTagMatch(tag) || (!(valid.asUInt() & (~(1<<idx))).orR), "suspicious insert")
       this.tag := tag
       this.level := level.extract(log2Ceil(pgLevels - superpageOnly.toInt)-1, 0)
       valid(idx) := true

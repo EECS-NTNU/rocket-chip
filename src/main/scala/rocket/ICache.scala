@@ -50,7 +50,7 @@ class ICacheErrors(implicit p: Parameters) extends CoreBundle()(p)
 }
 
 class ICache(val icacheParams: ICacheParams, val hartId: Int)(implicit p: Parameters) extends LazyModule {
-  lazy val module: BaseICacheModule = if(icacheParams.naiveCache) new NaiveICacheModule(this) else new ICacheModuleReduced(this)
+  lazy val module: BaseICacheModule = if(icacheParams.naiveCache) new TLCICacheModule(this) else new ICacheModuleReduced(this)
   val masterNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters(
     sourceId = IdRange(0, 1 + icacheParams.prefetch.toInt), // 0=refill, 1=hint
     name = s"Core ${hartId} ICache")))))
@@ -124,7 +124,7 @@ class BaseICacheModule(outer: ICache) extends LazyModuleImp(outer)
 import chisel3.experimental.chiselName
 // a naive ICache implementation, that fetches from memory almost all the time (1 cache line)
 @chiselName
-class NaiveICacheModule(outer: ICache) extends  BaseICacheModule(outer){
+class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val tlb: BaseTLB = Module(new SimplifiedITLB(log2Ceil(fetchBytes),
   //    TLBConfig(nTLBEntries),
   TLBConfig(28, 4),

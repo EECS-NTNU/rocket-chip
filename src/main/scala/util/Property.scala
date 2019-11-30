@@ -37,13 +37,13 @@ abstract class BasePropertyLibrary {
 class DefaultPropertyLibrary extends BasePropertyLibrary {
   def generateProperty(prop_param: BasePropertyParameters)(implicit sourceInfo: SourceInfo) {
     // default is to do nothing
-//    Unit
-    import chisel3._
-    if(prop_param.label.contains("ITLB_")) {
-      when (prop_param.cond && !Module.reset.toBool) {
-        printf(p"${prop_param.label} - ${prop_param.message}\n")
-      }
-    }
+    Unit
+//    import chisel3._
+//    if(prop_param.label.contains("ITLB_")) {
+//      when (prop_param.cond && !Module.reset.toBool) {
+//        printf(p"${prop_param.label} - ${prop_param.message}\n")
+//      }
+//    }
   }
 }
 
