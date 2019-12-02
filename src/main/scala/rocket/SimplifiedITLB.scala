@@ -216,7 +216,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
   when(tlc_io.insert.enable){
     val vpn = tlc_io.insert.address(vaddrBits-1, pgIdxBits)
     val page_offset = tlc_io.insert.address(pgIdxBits-1, 0)
-    val tlb_set = tlc_io.insert.tlbBP.set
+    val tlb_set = if(cfg.nSectors!=1) tlc_io.insert.tlbBP.set else 0.U
     val tlb_way = tlc_io.insert.tlbBP.way
     when(tlb_way === tlbWays){
       special_entry.foreach(_.insertLine(tlb_set, page_offset, tlc_io.insert.cacheWay))
@@ -228,7 +228,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
     all_entries.foreach(_.invalidateLines())
   }
   when(tlc_io.invalidate.single){
-    val tlb_set = tlc_io.invalidate.singleBP.set
+    val tlb_set = if(cfg.nSectors!=1) tlc_io.invalidate.singleBP.set else 0.U
     val tlb_way = tlc_io.invalidate.singleBP.way
     when(tlb_way === tlbWays){
       special_entry.foreach(_.invalidateLine(tlb_set, tlc_io.invalidate.singleCacheSet))
@@ -238,7 +238,7 @@ class SimplifiedITLB(lgMaxSize: Int, cfg: TLBConfig, cacheBlockBytes: Int)(impli
   }
   // TODO: check that OH for special_entry is actually cfg.nSectors
   val sh = all_entries.map(_.hit(vpn))
-  val sector = Mux1H(sh, all_entries.map(_.sectorIdx(vpn)))
+  val sector = if(cfg.nSectors!=1) Mux1H(sh, all_entries.map(_.sectorIdx(vpn))) else 0.U
   val way = OHToUInt(sh.asUInt)
   tlc_io.cacheBackPointer.set := sector
   tlc_io.cacheBackPointer.way := way

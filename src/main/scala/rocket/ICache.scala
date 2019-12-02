@@ -127,7 +127,7 @@ import chisel3.experimental.chiselName
 class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   val tlb: BaseTLB = Module(new SimplifiedITLB(log2Ceil(fetchBytes),
   //    TLBConfig(nTLBEntries),
-  TLBConfig(28, 4),
+  TLBConfig(31, 1),
   cacheBlockBytes))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
@@ -633,7 +633,7 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
 class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
   val tlb: BaseTLB = Module(new TLB(true, log2Ceil(fetchBytes),
-        TLBConfig(nTLBEntries)
+        TLBConfig(32, 1)//nTLBEntries)
   ))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
