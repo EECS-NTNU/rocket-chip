@@ -153,17 +153,23 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   require(outer.icacheParams.latency == 2)
   require(log2Ceil(cacheBlockBytes)+ log2Ceil(nSets) == pgIdxBits)
 
+  // refill signals
+  val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
+  val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
+  val refill_invalidated = RegInit(false.B)
 
   // cycle signals
   val s0_valid = WireInit(io.req.fire())
-  val s1_valid = RegNext(s0_valid, false.B) && !io.s1_kill
+  val s1_valid = RegNext(s0_valid, false.B) && !io.s1_kill && !mem_response_present
   val s2_valid = RegNext(s1_valid, false.B) && !io.s2_kill
 
   val s1_vaddr = RegNext(s0_vaddr)
   val s2_vaddr = RegNext(s1_vaddr)
   val s2_paddr = RegNext(s1_paddr)
 
-  val s1_line_index = s1_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits/8))
+  val s1_line_index = s1_vaddr.extract(lgCacheBlockBytes-1, log2Ceil(wordBits*wordsPerBeat/8))
+  val s1_word_index = s1_vaddr.extract(log2Ceil(wordBits*wordsPerBeat/8)-1, log2Ceil(wordBits/8))
+  val s2_word_index = RegNext(s1_word_index)
 
   val s1_ptag = WireInit(s1_paddr >> blockOffBits)
   val s2_ptag = RegNext(s1_ptag)
@@ -176,14 +182,14 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 //  val refill_tag = RegEnable(s2_paddr >> blockOffBits, s2_request_refill)
   val refill_vaddr = RegEnable(s2_vaddr, s2_request_refill)
   val refill_tlb_bp = RegEnable(RegNext(tlc.cacheBackPointer), s2_request_refill)
-  val cache_line = SeqMem(cacheBlockBytes/wordBytes*nSets*nWays, UInt(wordBits.W))
+  val cache_line = DescribedSRAM(
+    name = "data_arrays",
+    desc = "ICache Data Array",
+    size = cacheBlockBytes/wordBytes/wordsPerBeat*nSets*nWays,
+    data = Vec(wordsPerBeat, UInt(wordBits.W))
+  )
   val back_pointer = SeqMem(nSets*nWays, tlc.cacheBackPointer.cloneType)
 //  val tag = RegInit(0.U)
-
-  // refill signals
-  val mem_response_present = WireInit(tl_out.d.fire() && edge_out.hasData(tl_out.d.bits))
-  val (_, _, d_refill_done, d_refill_cnt) = edge_out.count(tl_out.d)
-  val refill_invalidated = RegInit(false.B)
 
 
   // way signals
@@ -224,14 +230,15 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   }
 
   // refill logic
+  require(wordsPerBeat <= 2)
   when(mem_response_present) {
-    for (i <- 0 until wordsPerBeat) {
-      val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
-      val write_line_index = Cat(d_refill_cnt(log2Ceil(cacheBlockBytes/wordsPerBeat/wordBytes)-1, 0), beatIdx)
+//    for (i <- 0 until wordsPerBeat) {
+//      val beatIdx = i.U(log2Ceil(wordsPerBeat).W)
+      val write_line_index = d_refill_cnt(log2Ceil(cacheBlockBytes/wordsPerBeat/wordBytes)-1, 0)
       val write_idx = Cat(refill_way, refill_set, write_line_index)
-
-      cache_line(write_idx) := tl_out.d.bits.data((i + 1) * wordBits - 1, i * wordBits)
-    }
+      val write_data = tl_out.d.bits.data.asTypeOf(Vec(wordsPerBeat, UInt(wordBits.W)))
+      cache_line.write(write_idx,write_data)
+//    }
   }
   tlc.insert.enable := false
   tlc.insert.address := refill_vaddr
@@ -263,7 +270,10 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
   // only be ready when no refill data is being written
   io.req.ready := !mem_response_present
   io.resp.valid := s2_valid && s2_in_cache
-  io.resp.bits.data := cache_line(s1_cache_idx)
+  // make sure to only use two ports of the memory
+  val s2_read_data = cache_line.read(s1_cache_idx, !mem_response_present)
+  io.resp.bits.data := s2_read_data(s2_word_index)
+
   // not entirely sure what those do
   io.resp.bits.ae := false.B
   io.resp.bits.replay := false.B
@@ -633,7 +643,7 @@ class TLCICacheModule(outer: ICache) extends  BaseICacheModule(outer){
 
 class ICacheModuleReduced(outer: ICache) extends  BaseICacheModule(outer){
   val tlb: BaseTLB = Module(new TLB(true, log2Ceil(fetchBytes),
-        TLBConfig(32, 1)//nTLBEntries)
+        TLBConfig(32, 4)//nTLBEntries)
   ))
   io.ptw <> tlb.io.ptw
   val s1_tlb_valid = RegNext(io.req.valid)
