@@ -7,7 +7,7 @@ import Chisel._
 import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 
-class EventSet(gate: (UInt, UInt) => Bool, events: Seq[(String, () => Bool)]) {
+class EventSet(gate: (UInt, UInt) => Bool,val events: Seq[(String, () => Bool)]) {
   def size = events.size
   def hits = events.map(_._2()).asUInt
   def check(mask: UInt) = gate(mask, hits)
@@ -45,6 +45,17 @@ class EventSets(val eventSets: Seq[EventSet]) {
   }
 
   def cover() = eventSets.foreach { _ withCovers }
+
+  def print(): Unit = {
+    println("===Performance Events===")
+    for((set, setIdx) <- eventSets zipWithIndex){
+      for(((eventName,_), eventIdx) <- set.events zipWithIndex) {
+        val mask = (1 << (eventSetIdBits+eventIdx)) + setIdx
+        println(f"0x$mask%04X $eventName")
+      }
+      println()
+    }
+  }
 
   private def eventSetIdBits = 8
 }
