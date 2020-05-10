@@ -24,7 +24,8 @@ case class ParsedInputNames(
   val configClasses: Seq[String] = configs.split('_')
   def prepend(prefix: String, suffix: String) =
     if (prefix == "" || prefix == "_root_") suffix else (prefix + "." + suffix)
-  val fullConfigClasses: Seq[String] = configClasses.map(x => prepend(configProject, x))
+  val fullConfigClasses: Seq[String] = configClasses.map(x => if(!x.contains("."))
+    prepend(configProject, x) else x)
   val fullTopModuleClass: String = prepend(topModuleProject, topModuleClass)
 }
 
