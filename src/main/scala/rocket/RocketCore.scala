@@ -100,6 +100,14 @@ class RocketCustomCSRs(implicit p: Parameters) extends CustomCSRs with HasRocket
   override def decls = super.decls :+ marchid :+ mvendorid :+ mimpid
 }
 
+class Decode(val decode_table: Seq[(BitPat, List[BitPat])])(implicit p: Parameters) extends CoreModule{
+  val io = IO(new Bundle{
+    val instruction = Input(UInt())
+    val decoded = Output(new IntCtrlSigs())
+  })
+  io.decoded.decode(io.instruction, decode_table)
+}
+
 @chiselName
 class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     with HasRocketCoreParameters
@@ -164,7 +172,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
       ("L2 TLB miss", () => io.ptw.perf.l2miss)))))
 
   val pipelinedMul = usingMulDiv && mulDivParams.mulUnroll == xLen
-  val decode_table = {
+  val decode_table: Seq[(BitPat, List[BitPat])] = {
     require(!usingRoCC || !rocketParams.useSCIE)
     (if (usingMulDiv) new MDecode(pipelinedMul) +: (xLen > 32).option(new M64Decode(pipelinedMul)).toSeq else Nil) ++:
     (if (usingAtomics) new ADecode +: (xLen > 32).option(new A64Decode).toSeq else Nil) ++:
@@ -254,7 +262,9 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
 
   require(decodeWidth == 1 /* TODO */ && retireWidth == decodeWidth)
   require(!(coreParams.useRVE && coreParams.fpu.nonEmpty), "Can't select both RVE and floating-point")
-  val id_ctrl = Wire(new IntCtrlSigs()).decode(id_inst(0), decode_table)
+  val decoder = Module(new Decode(decode_table))
+  decoder.io.instruction := id_inst(0)
+  val id_ctrl = decoder.io.decoded
   val lgNXRegs = if (coreParams.useRVE) 4 else 5
   val regAddrMask = (1 << lgNXRegs) - 1
 
@@ -268,8 +278,12 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   val id_reg_fence = Reg(init=Bool(false))
   val id_ren = IndexedSeq(id_ctrl.rxs1, id_ctrl.rxs2)
   val id_raddr = IndexedSeq(id_raddr1, id_raddr2)
-  val rf = new RegFile(regAddrMask, xLen)
-  val id_rs = id_raddr.map(rf.read _)
+  val rf = Module(new RocketRegisterFile(2, 1, xLen))
+  val id_rs = id_raddr.zipWithIndex.map {
+    case (a, i) => {
+      rf.io.read(i).addr := a
+      rf.io.read(i).data
+    }}
   val ctrl_killd = Wire(Bool())
   val id_npc = (ibuf.io.pc.asSInt + ImmGen(IMM_UJ, id_inst(0))).asUInt
 
@@ -668,7 +682,9 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
                  Mux(wb_ctrl.csr =/= CSR.N, csr.io.rw.rdata,
                  Mux(wb_ctrl.mul, mul.map(_.io.resp.bits.data).getOrElse(wb_reg_wdata),
                  wb_reg_wdata))))
-  when (rf_wen) { rf.write(rf_waddr, rf_wdata) }
+  rf.io.write(0).valid := rf_wen
+  rf.io.write(0).bits.data := rf_wdata
+  rf.io.write(0).bits.addr := rf_waddr
 
   // hook up control/status regfile
   csr.io.ungated_clock := clock
@@ -979,26 +995,85 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   }
 }
 
-class RegFile(n: Int, w: Int, zero: Boolean = false) {
-  val rf = Mem(n, UInt(width = w))
-  private def access(addr: UInt) = rf(~addr(log2Up(n)-1,0))
-  private val reads = ArrayBuffer[(UInt,UInt)]()
-  private var canRead = true
-  def read(addr: UInt) = {
-    require(canRead)
-    reads += addr -> Wire(UInt())
-    reads.last._2 := Mux(Bool(zero) && addr === UInt(0), UInt(0), access(addr))
-    reads.last._2
-  }
-  def write(addr: UInt, data: UInt) = {
-    canRead = false
-    when (addr =/= UInt(0)) {
-      access(addr) := data
-      for ((raddr, rdata) <- reads)
-        when (addr === raddr) { rdata := data }
+class RocketRegisterFile(val reads: Int, val writes: Int, val width: Int) extends Module{
+  val io = IO(new Bundle{
+    val write = Input(Vec(writes, Valid(new Bundle{
+      val addr = UInt(5.W)
+      val data = UInt(width.W)
+    })))
+    val read = Vec(reads, new Bundle{
+      val addr = Input(UInt(5.W))
+      val data = Output(UInt(width.W))
+    })
+  })
+  val mem = Mem(32, Bits(width = width))
+  io.read.foreach(r => {
+    r.data := 0.U
+    when(r.addr =/= 0.U){
+      r.data := mem(r.addr)
     }
-  }
+  })
+  io.write.foreach(w => {
+    when(w.valid && w.bits.addr =/= 0.U){
+      mem.write(w.bits.addr, w.bits.data)
+      io.read.foreach(r => {
+        when(r.addr === w.bits.addr){
+          r.data := w.bits.data
+        }
+      })
+    }
+  })
 }
+
+//class RegFile(n: Int, w: Int, zero: Boolean = false) {
+//  val rf = Module(new RocketRegisterFile(2, 1, w));
+//  private var wCtr = 0
+//  private var rCtr = 0
+//  //  private def access(addr: UInt) = rf(~addr(log2Up(n)-1,0))
+//  private val reads = ArrayBuffer[(UInt,UInt)]()
+//  private var canRead = true
+//  require(n==31)
+//  def read(addr: UInt) = {
+//    require(canRead)
+//    reads += addr -> Wire(UInt())
+//    rf.io.read(rCtr).addr := addr//~addr(log2Up(n)-1,0)
+//    reads.last._2 := Mux(Bool(zero) && addr === UInt(0), UInt(0), rf.io.read(rCtr).data)
+//    rCtr += 1
+//    reads.last._2
+//  }
+//  def write(addr: UInt, data: UInt) = {
+//    canRead = false
+//    rf.io.write(wCtr).valid := false.B
+//    rf.io.write(wCtr).bits.addr := addr//~addr(log2Up(n)-1,0)
+//    rf.io.write(wCtr).bits.data := data
+//    when (addr =/= UInt(0)) {
+//      rf.io.write(wCtr).valid := true.B
+//      for ((raddr, rdata) <- reads)
+//        when (addr === raddr) { rdata := data }
+//    }
+//    wCtr += 1
+//  }
+//}
+//class RegFile(n: Int, w: Int, zero: Boolean = false) {
+//  val rf = Mem(n, UInt(width = w))
+//  private def access(addr: UInt) = rf(~addr(log2Up(n)-1,0))
+//  private val reads = ArrayBuffer[(UInt,UInt)]()
+//  private var canRead = true
+//  def read(addr: UInt) = {
+//    require(canRead)
+//    reads += addr -> Wire(UInt())
+//    reads.last._2 := Mux(Bool(zero) && addr === UInt(0), UInt(0), access(addr))
+//    reads.last._2
+//  }
+//  def write(addr: UInt, data: UInt) = {
+//    canRead = false
+//    when (addr =/= UInt(0)) {
+//      access(addr) := data
+//      for ((raddr, rdata) <- reads)
+//        when (addr === raddr) { rdata := data }
+//    }
+//  }
+//}
 
 object ImmGen {
   def apply(sel: UInt, inst: UInt) = {

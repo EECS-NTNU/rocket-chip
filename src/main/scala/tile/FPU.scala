@@ -674,6 +674,104 @@ class FPUFMAPipe(val latency: Int, val t: FType)
   io.out := Pipe(fma.io.validout, res, (latency-3) max 0)
 }
 
+class MultiWriteSramBase[T <: Data](size: Int, data: T, reads: Int, writes: Int) extends Module {
+
+  import chisel3.{Bool, Bundle, Data, Input, Module, Output, SyncReadMem, UInt, Vec, VecInit, WireInit, when, withClock}
+  import chisel3.experimental.{NoChiselNamePrefix, chiselName}
+  import chisel3.internal.DontCareBinding
+  import chisel3.util.log2Up
+  class MyBundleWrite[U <: Data](private val gen: U) extends Bundle {
+    val addr = UInt(log2Up(size).W)
+    val data = gen
+    val en = Bool()
+  }
+  class MyBundleRead[U <: Data](private val gen: U) extends Bundle {
+    val addr = Input(UInt(log2Up(size).W))
+    val data = Output(gen)
+  }
+  class MyBundle[U <: Data](private val gen: U) extends Bundle {
+    val write = Input(Vec(writes, new MyBundleWrite(gen)))
+    val read = Vec(reads, new MyBundleRead(gen))
+  }
+  val io = IO(new MyBundle(data))
+  // this will be turned to bits because it needs multiple writes - sync because it is read in the same cycle as the srams
+  val ways = SyncReadMem(size, UInt(log2Up(writes).W))
+
+  val srams = io.write.map(_ => SyncReadMem(size, data))
+  //  val test = SyncReadMem(size,data)
+  //  val test_valid = RegInit(VecInit(Seq.fill(size)(false.B)))
+  for ((w, i) <- io.write zipWithIndex) {
+    when(w.en) {
+      srams(i).write(w.addr, w.data)
+      // TODO: check colliding writes
+      ways(w.addr) := i.U
+      //      test(w.addr) := w.data
+      //      test_valid(w.addr) := true.B
+    }
+  }
+
+  io.read.foreach(r => {
+    val way = if(writes==1) WireInit(0.U) else WireInit(ways.read(r.addr))
+    //    way.suggestName("way")
+    //    dontTouch(way)
+    val reads = WireInit(VecInit(srams.map(s => s.read(r.addr))))
+    //    reads.suggestName("reads")
+    //    dontTouch(reads)
+    val read_data = WireInit(reads(way))
+    //    read_data.suggestName("read_data")
+    //    dontTouch(read_data)
+    r.data := read_data
+    //    val read_valid = WireInit(test_valid(RegNext(r.addr)))
+    //    read_valid.suggestName("read_valid")
+    //    dontTouch(read_valid)
+    //    val test_read = WireInit(test(r.addr))
+    //    test_read.suggestName("test_read")
+    //    dontTouch(test_read)
+    //    assert(!read_valid || (test_read === read_data), "failure in MultiWriteSram")
+  })
+}
+
+class MultiWriteSram(size: Int, width: Int, reads: Int, writes: Int) extends MultiWriteSramBase(
+  size, UInt(width.W), reads, writes
+)
+
+class RocketFloatRegisterFile(val reads: Int, val writes: Int, val width: Int) extends Module{
+  val io = IO(new Bundle{
+    val write = Input(Vec(writes, Valid(new Bundle{
+      val addr = UInt()
+      val data = UInt(width.W)
+    })))
+    val read = Vec(reads, new Bundle{
+      val addr = Input(UInt())
+      val data = Output(UInt(width.W))
+    })
+  })
+  val mem = Mem(32, Bits(width = width))
+//  val float_ram = Module(new MultiWriteSram(32, width, reads, writes))
+//  for(i <- 0 until writes){
+//    float_ram.io.write(i).en := io.write(i).valid
+//    float_ram.io.write(i).addr := io.write(i).bits.addr
+//    float_ram.io.write(i).data := io.write(i).bits.data
+//  }
+//  for(i <- 0 until reads){
+//    io.read(i).data := float_ram.io.read(i).data
+//    float_ram.io.read(i).addr := io.read(i).addr
+//    for(j <- 0 until writes){
+//      when(RegNext(io.write(j).valid && float_ram.io.read(i).addr === io.write(j).bits.addr)){
+//        io.read(i).data := RegNext(io.write(j).bits.data)
+//      }
+//    }
+//  }
+  io.write.foreach(w => {
+    when(w.valid){
+      mem.write(w.bits.addr, w.bits.data)
+    }
+  })
+  io.read.foreach(r => {
+    r.data := mem(r.addr)
+  })
+}
+
 @chiselName
 class FPU(cfg: FPUParams)(implicit p: Parameters) extends FPUModule()(p) {
   val io = new FPUIO
@@ -729,16 +827,26 @@ class FPU(cfg: FPUParams)(implicit p: Parameters) extends FPUModule()(p) {
   val wb_ctrl = RegEnable(mem_ctrl, mem_reg_valid)
 
   // regfile
-  val regfile = Mem(32, Bits(width = fLen+1))
+  val regfile = Module(new RocketFloatRegisterFile(3, 2, fLen+1))
+  regfile.io.write.foreach(w => {
+    w.valid := false.B
+    w.bits := chisel3.DontCare
+  })
   when (load_wb) {
     val wdata = recode(load_wb_data, load_wb_double)
-    regfile(load_wb_tag) := wdata
+    regfile.io.write(0).bits.addr := load_wb_tag
+    regfile.io.write(0).bits.data := wdata
+    regfile.io.write(0).valid := true.B
     assert(consistent(wdata))
     if (enableCommitLog)
       printf("f%d p%d 0x%x\n", load_wb_tag, load_wb_tag + 32, load_wb_data)
   }
 
-  val ex_rs = ex_ra.map(a => regfile(a))
+  val ex_rs = ex_ra.zipWithIndex.map {
+    case (a, i) => {
+      regfile.io.read(i).addr := a
+      regfile.io.read(i).data
+    }}
   when (io.valid) {
     when (id_ctrl.ren1) {
       when (!id_ctrl.swap12) { ex_ra(0) := io.inst(19,15) }
@@ -862,7 +970,9 @@ class FPU(cfg: FPUParams)(implicit p: Parameters) extends FPUModule()(p) {
   val wexc = (pipes.map(_.res.exc): Seq[UInt])(wbInfo(0).pipeid)
   when ((!wbInfo(0).cp && wen(0)) || divSqrt_wen) {
     assert(consistent(wdata))
-    regfile(waddr) := wdata
+    regfile.io.write(1).bits.addr := waddr
+    regfile.io.write(1).bits.data := wdata
+    regfile.io.write(1).valid := true.B
     if (enableCommitLog) {
       printf("f%d p%d 0x%x\n", waddr, waddr + 32, ieee(wdata))
     }
