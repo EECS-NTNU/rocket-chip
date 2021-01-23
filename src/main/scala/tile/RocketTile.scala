@@ -154,6 +154,7 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
 
   // Pass through various external constants and reports
   outer.traceSourceNode.bundle <> core.io.trace
+  outer.genericTraceSourceNode.bundle <> core.io.generic_trace
   core.io.traceStall := outer.traceAuxSinkNode.bundle.stall
   outer.bpwatchSourceNode.bundle <> core.io.bpwatch
   outer.frontend.module.io.reset_vector := constants.reset_vector

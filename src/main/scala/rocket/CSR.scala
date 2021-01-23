@@ -5,11 +5,12 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import chisel3.withClock
+import chisel3.{Bundle, Vec, VecInit, withClock}
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
+
 import scala.collection.mutable.LinkedHashMap
 import Instructions._
 
@@ -161,6 +162,18 @@ class PerfCounterIO(implicit p: Parameters) extends CoreBundle
   val inc = UInt(INPUT, log2Ceil(1+retireWidth))
 }
 
+class GenericTrace(val bitWidth: Int) extends Bundle {
+  val valid = Bool()
+  val bits = Vec(bitWidth, Bool())
+}
+
+class HWSample(val insWidth : Int, val flagWidth : Int) extends Bundle {
+  val valid         = Bool()
+  val cycle         = UInt(width = insWidth)
+  val ip            = UInt(width = insWidth)
+  val flags         = Vec(flagWidth, Bool()) // stalled, deferred, retired, misspeculated, flushes
+}
+
 class TracedInstruction(implicit p: Parameters) extends CoreBundle {
   val valid = Bool()
   val iaddr = UInt(width = coreMaxAddrBits)
@@ -228,6 +241,12 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
   val csrw_counter = UInt(OUTPUT, CSR.nCtr)
   val inst = Vec(retireWidth, UInt(width = iLen)).asInput
   val trace = Vec(retireWidth, new TracedInstruction).asOutput
+
+  val hw_sampler_enable = Output(Bool())
+  val hw_sampler_period = Output(UInt(xLen.W))
+  val hw_sampler_confirm = Output(Bool())
+  val hw_sampler_ready = Input(Bool())
+  val hw_samples = Vec(nHWSamplers, new HWSample(xLen, hwSampleFlagBits)).asInput
 
   val vector = usingVector.option(new Bundle {
     val vconfig = new VConfig().asOutput
@@ -406,6 +425,28 @@ class CSRFile(
   (io.counters zip reg_hpmevent) foreach { case (c, e) => c.eventSel := e }
   val reg_hpmcounter = io.counters.map(c => WideCounter(CSR.hpmWidth, c.inc, reset = false))
 
+  val reg_hw_sampler_ctrl = RegInit(VecInit(Seq.fill(xLen)(false.B)))
+  io.hw_sampler_enable := reg_hw_sampler_ctrl(0)
+  io.hw_sampler_confirm := reg_hw_sampler_ctrl(1)
+  for (i <- 0 until nHWSamplers) {
+    reg_hw_sampler_ctrl(2 + i) := io.hw_samples(i).valid
+  }
+  for (i <- 0 until nHWSamplers) {
+    for (f <- 0 until hwSampleFlagBits) {
+      val ctrlindex = 2 + nHWSamplers + (i * hwSampleFlagBits) + f
+      if (ctrlindex < xLen) {
+        reg_hw_sampler_ctrl(ctrlindex) := io.hw_samples(i).flags(f)
+      }
+    }
+  }
+
+  val reg_hw_sampler_period = Reg(0.U(xLen.W))
+  io.hw_sampler_period := reg_hw_sampler_period
+  // Reset HW sample confirm
+  when (reg_hw_sampler_ctrl(1)) {
+    reg_hw_sampler_ctrl(1) := false.B
+  }
+
   val mip = Wire(init=reg_mip)
   mip.lip := (io.interrupts.lip: Seq[Bool])
   mip.mtip := io.interrupts.mtip
@@ -460,7 +501,16 @@ class CSRFile(
     CSRs.mepc -> readEPC(reg_mepc).sextTo(xLen),
     CSRs.mtval -> reg_mtval.sextTo(xLen),
     CSRs.mcause -> reg_mcause,
-    CSRs.mhartid -> io.hartid)
+    CSRs.mhartid -> io.hartid,
+    CSRs.hwsamplectrl -> reg_hw_sampler_ctrl.asUInt().padTo(xLen),
+    CSRs.hwsampleperiod -> reg_hw_sampler_period,
+  )
+
+  // Explicitly map first hardware sample to a special CSR
+  if (nHWSamplers > 0) {
+    read_mapping += CSRs.hwsamplecycle -> io.hw_samples(0).cycle
+    read_mapping += CSRs.hwsampleip -> io.hw_samples(0).ip
+  }
 
   val debug_csrs = if (!usingDebug) LinkedHashMap() else LinkedHashMap[Int,Bits](
     CSRs.dcsr -> reg_dcsr.asUInt,
@@ -823,6 +873,16 @@ class CSRFile(
       reg_mstatus.vs := formVS(new_mstatus.vs)
       if (usingRoCC) reg_mstatus.xs := Fill(2, new_mstatus.xs.orR)
     }
+
+    if (nHWSamplers > 0) {
+      when(decoded_addr(CSRs.hwsamplectrl)) {
+        reg_hw_sampler_ctrl(0) := wdata(0)
+      }
+      when(decoded_addr(CSRs.hwsampleperiod) && !io.hw_sampler_enable) {
+        reg_hw_sampler_period := wdata
+      }
+    }
+
     when (decoded_addr(CSRs.misa)) {
       val mask = UInt(isaStringToMask(isaMaskString), xLen)
       val f = wdata('f' - 'a')

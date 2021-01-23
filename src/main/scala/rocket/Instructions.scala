@@ -1028,6 +1028,10 @@ object CSRs {
   val mhpmcounter29h = 0xb9d
   val mhpmcounter30h = 0xb9e
   val mhpmcounter31h = 0xb9f
+  val hwsamplectrl = 0x7d0
+  val hwsampleperiod = 0x7d1
+  val hwsamplecycle = 0x7d2
+  val hwsampleip = 0x7d3
   val all = {
     val res = collection.mutable.ArrayBuffer[Int]()
     res += fflags
@@ -1221,6 +1225,10 @@ object CSRs {
     res += marchid
     res += mimpid
     res += mhartid
+    res += hwsamplectrl
+    res += hwsampleperiod
+    res += hwsamplecycle
+    res += hwsampleip
     res.toArray
   }
   val all32 = {

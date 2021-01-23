@@ -177,6 +177,11 @@ abstract class BaseTile private (val crossing: ClockCrossingType, q: Parameters)
   val traceNode = BundleBroadcast[Vec[TracedInstruction]](Some("trace"))
   traceNode := traceSourceNode
 
+  // Node for legacy hw samples trace from core
+  val genericTraceSourceNode = BundleBridgeSource(() => new GenericTrace(tileParams.core.genericTraceInterfaceWidth))
+  val genericTraceNode = BundleBroadcast[GenericTrace](Some("gentrace"))
+  genericTraceNode := genericTraceSourceNode
+
   // Trace sideband signals into core
   val traceAuxNode = BundleBridgeNexus[TraceAux]()
   val traceAuxSinkNode = BundleBridgeSink[TraceAux]()
