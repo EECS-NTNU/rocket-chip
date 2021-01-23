@@ -5,8 +5,8 @@ package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import chisel3.withClock
-import chisel3.experimental.{chiselName, NoChiselNamePrefix}
+import chisel3.{DontCare, withClock}
+import chisel3.experimental.{NoChiselNamePrefix, chiselName}
 import freechips.rocketchip.config.Parameters
 import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
@@ -705,11 +705,19 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
   csr.io.rw.addr := wb_reg_inst(31,20)
   csr.io.rw.cmd := CSR.maskCmd(wb_reg_valid, wb_ctrl.csr)
   csr.io.rw.wdata := wb_reg_wdata
+  io.generic_trace := DontCare
+  io.generic_trace.valid := false.B
   io.trace := csr.io.trace
+
   for (((iobpw, wphit), bp) <- io.bpwatch zip wb_reg_wphit zip csr.io.bp) {
     iobpw.valid(0) := wphit
     iobpw.action := bp.control.action
   }
+
+  // HWSamplers not implemented for RocketCore
+  csr.io.hw_sampler_ready := false.B
+  csr.io.hw_samples := DontCare
+  csr.io.hw_samples map (t => t.valid := false.B)
 
   val hazard_targets = Seq((id_ctrl.rxs1 && id_raddr1 =/= UInt(0), id_raddr1),
                            (id_ctrl.rxs2 && id_raddr2 =/= UInt(0), id_raddr2),

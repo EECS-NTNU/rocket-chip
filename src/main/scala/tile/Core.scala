@@ -48,6 +48,11 @@ trait CoreParams {
   val nL2TLBWays: Int
   val mtvecInit: Option[BigInt]
   val mtvecWritable: Boolean
+
+  def nHWSamplers: Int = 0
+  def hwSampleFlagBits: Int = 0
+  def genericTraceInterfaceWidth: Int = 0
+
   def customCSRs(implicit p: Parameters): CustomCSRs = new CustomCSRs
 
   def hasSupervisorMode: Boolean = useSupervisor || useVM
@@ -99,6 +104,10 @@ trait HasCoreParameters extends HasTileParameters {
   val mtvecInit = coreParams.mtvecInit
   val mtvecWritable = coreParams.mtvecWritable
 
+  val nHWSamplers = coreParams.nHWSamplers
+  val hwSampleFlagBits = coreParams.hwSampleFlagBits
+  val genericTraceInterfaceWidth = coreParams.genericTraceInterfaceWidth
+
   def vLen = coreParams.vLen
   def sLen = coreParams.sLen
   def eLen = coreParams.eLen(xLen, fLen)
@@ -147,6 +156,7 @@ trait HasCoreIO extends HasTileParameters {
     val fpu = new FPUCoreIO().flip
     val rocc = new RoCCCoreIO().flip
     val trace = Vec(coreParams.retireWidth, new TracedInstruction).asOutput
+    val generic_trace = new GenericTrace(genericTraceInterfaceWidth).asOutput
     val bpwatch = Vec(coreParams.nBreakpoints, new BPWatch(coreParams.retireWidth)).asOutput
     val cease = Bool().asOutput
     val wfi = Bool().asOutput
