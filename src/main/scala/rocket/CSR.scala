@@ -255,12 +255,6 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
   val hw_sampler_ready = Input(Bool())
   val hw_samples = Vec(nHWSamplers, new HWSample(xLen, hwSampleFlagBits)).asInput
 
-  val hw_sampler_enable = Output(Bool())
-  val hw_sampler_period = Output(UInt(xLen.W))
-  val hw_sampler_confirm = Output(Bool())
-  val hw_sampler_ready = Input(Bool())
-  val hw_samples = Vec(nHWSamplers, new HWSample(xLen, hwSampleFlagBits)).asInput
-
   val vector = usingVector.option(new Bundle {
     val vconfig = new VConfig().asOutput
     val vstart = UInt(maxVLMax.log2.W).asOutput
@@ -467,28 +461,6 @@ class CSRFile(
     (io.counters zip reg_hpmevent) foreach { case (c, e) => c.eventSel := e }
   val reg_hpmcounter = io.counters.zipWithIndex.map { case (c, i) =>
     WideCounter(CSR.hpmWidth, c.inc, reset = false, inhibit = reg_mcountinhibit(CSR.firstHPM+i)) }
-
-  val reg_hw_sampler_ctrl = RegInit(VecInit(Seq.fill(xLen)(false.B)))
-  io.hw_sampler_enable := reg_hw_sampler_ctrl(0)
-  io.hw_sampler_confirm := reg_hw_sampler_ctrl(1)
-  for (i <- 0 until nHWSamplers) {
-    reg_hw_sampler_ctrl(2 + i) := io.hw_samples(i).valid
-  }
-  for (i <- 0 until nHWSamplers) {
-    for (f <- 0 until hwSampleFlagBits) {
-      val ctrlindex = 2 + nHWSamplers + (i * hwSampleFlagBits) + f
-      if (ctrlindex < xLen) {
-        reg_hw_sampler_ctrl(ctrlindex) := io.hw_samples(i).flags(f)
-      }
-    }
-  }
-
-  val reg_hw_sampler_period = Reg(0.U(xLen.W))
-  io.hw_sampler_period := reg_hw_sampler_period
-  // Reset HW sample confirm
-  when (reg_hw_sampler_ctrl(1)) {
-    reg_hw_sampler_ctrl(1) := false.B
-  }
 
   val reg_hw_sampler_ctrl = RegInit(VecInit(Seq.fill(xLen)(false.B)))
   io.hw_sampler_enable := reg_hw_sampler_ctrl(0)
