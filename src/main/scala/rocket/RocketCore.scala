@@ -714,10 +714,10 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
     iobpw.action := bp.control.action
   }
 
-  // HWSamplers not implemented for RocketCore
-  csr.io.hw_sampler_ready := false.B
-  csr.io.hw_samples := DontCare
-  csr.io.hw_samples map (t => t.valid := false.B)
+  // HWSampler not implemented for RocketCore, connect pmu overflow to ready
+  // to fire perf interrupt
+  csr.io.hw_sample := DontCare
+  csr.io.pmu_interrupt := csr.io.pmu_overflow
 
   val hazard_targets = Seq((id_ctrl.rxs1 && id_raddr1 =/= UInt(0), id_raddr1),
                            (id_ctrl.rxs2 && id_raddr2 =/= UInt(0), id_raddr2),
