@@ -388,6 +388,7 @@ class CSRFile(
     del.msip := false
     del.mtip := false
     del.meip := false
+    del.perf := true
 
     (sup.asUInt | supported_high_interrupts, del.asUInt)
   }
@@ -480,7 +481,10 @@ class CSRFile(
   val reg_hpmcounter = io.counters.zipWithIndex.map { case (c, i) =>
     WideCounter(CSR.hpmWidth, c.inc, reset = false, inhibit = reg_mcountinhibit(CSR.firstHPM+i)) }
 
-  val reg_timestamp_cycle = withClock(io.ungated_clock) { WideCounter(64) }
+
+  // Current ISA relies on a RTC outside of the clock domain of the HART
+  // However, reintroducing the CSR time and mtime makes this PMU proof of concept easier.
+  val reg_time = withClock(io.ungated_clock) { WideCounter(64) }
 
 
   // PMU Interrupt Pending
@@ -491,32 +495,28 @@ class CSRFile(
   // Use an entire register as configurable overflow
   val pmu_event_overflow: UInt = reg_pmuctrl1
   // Super Basic PMU Implementation with one configureable counter
-  val pmu_event_reset: Bool = reg_pmuctrl0(0)
-  val pmu_event_enable: Bool = reg_pmuctrl0(1) && pmu_event_overflow.orR()
+  val pmu_event_enable: Bool = reg_pmuctrl0(0) && pmu_event_overflow.orR()
   // Reserve first 16 bits in pmuctrl0 and use the rest as event select
   val pmu_event_select: UInt = reg_pmuctrl0.slice(16, xLen).asUInt()
 
-  val pmu_events: Vec[PMUEvent] = Wire(Vec(3 + reg_hpmcounter.size, new PMUEvent()))
-  pmu_events.zip(Seq(reg_timestamp_cycle, reg_cycle, reg_instret) ++ reg_hpmcounter) foreach {
-    case (e, c) =>
-      e.increment := c.inc
-      e.inhibit := c.inhibit
-      e.value := c.value
-  }
-
-  val pmu_event: PMUEvent = Wire(new PMUEvent())
-  val pmu_event_invalid = WireInit(0.U.asTypeOf(new PMUEvent()))
+  // val pmu_events_seq: Seq[UInt] = (Seq(reg_time, reg_cycle, reg_instret) ++ reg_hpmcounter).map(c => c.value)
+  // val pmu_events: Vec[UInt] = VecInit(pmu_events_seq)
+  val pmu_events: Vec[UInt] = VecInit((Seq(reg_time, reg_cycle, reg_instret) ++ reg_hpmcounter).map(c => c.value))
+  val pmu_event_invalid: UInt = WireInit(0.U(64.W))
+  val pmu_event: UInt = Wire(UInt(64.W))
   pmu_event := Mux(pmu_event_select < pmu_events.size, pmu_events(pmu_event_select), pmu_event_invalid)
 
-  val reg_pmu_counter: WideCounter = WideCounter(64, pmu_event.increment, inhibit = (!pmu_event_enable) || pmu_event.inhibit)
-  val pmu_event_fire: Bool = pmu_event_enable && (reg_pmu_counter.value >= (pmu_event_overflow - 1.U))
-  io.pmu_overflow := pmu_event_fire
-  io.pmu_value := pmu_event.value
-  when(!pmu_event_enable || pmu_event_fire) {
-    reg_pmu_counter := 0
-  }
+  val pmu_event_fire: Bool = pmu_event_enable && (pmu_event >= pmu_event_overflow)
 
-  val pmu_event_interrupt: Bool = pmu_event_enable && ((pmu_event_fire && io.pmu_interrupt) || (io.pmu_interrupt && !RegNext(io.pmu_interrupt)))
+  // pmu_overflow is high as long as the overflow is detected
+  io.pmu_overflow := pmu_event_fire
+  io.pmu_value := pmu_event
+
+  // pmu_event_interrupt is a single cycle signal that indicates when to interrupt or pull up interrupt pending
+  // logic is first the pmu needs to be enabled, then
+  //   either the overflow happens and the interrupt line is high
+  //   or the interrupt line is pulled up
+  val pmu_event_interrupt: Bool = pmu_event_enable && (io.pmu_interrupt && (!RegNext(io.pmu_interrupt) || (pmu_event_fire && !RegNext(pmu_event_fire))))
   when (pmu_event_interrupt) {
     reg_pip := true.B
   }
@@ -639,6 +639,10 @@ class CSRFile(
     CSRs.hwsamplevalue -> reg_hwsample_value,
     CSRs.hwsampleflags -> Cat(reg_hwsample_oldest, reg_hwsample_valid.asUInt(), reg_hwsample_flags.asUInt()).pad(xLen),
   )
+
+  // Reintroduce time CSR for PMU proof of concept.
+  read_mapping += CSRs.time -> reg_time
+  read_mapping += CSRs.timeh -> (reg_time >> 32)
 
   assert(retireWidth <= 6, "HWSample currently supports retire widths up to only 6")
   // Explicitly map hardware sample to a special CSR
@@ -1079,10 +1083,6 @@ class CSRFile(
     // PMU Control Register write logic
     when(decoded_addr(CSRs.pmuctrl0)) {
       reg_pmuctrl0 := wdata.asBools()
-      // First bit is the counter reset bit
-      when (wdata(0)) {
-        reg_pmu_counter := 0
-      }
       // Interrupt gets acknowledged if one writes to the control regs
       reg_pip := false.B
       mip.perf := false.B
