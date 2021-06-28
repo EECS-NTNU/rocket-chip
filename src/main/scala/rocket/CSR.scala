@@ -482,13 +482,19 @@ class CSRFile(
     WideCounter(CSR.hpmWidth, c.inc, reset = false, inhibit = reg_mcountinhibit(CSR.firstHPM+i)) }
 
 
-  // Current ISA relies on a RTC outside of the clock domain of the HART
-  // However, reintroducing the CSR time and mtime makes this PMU proof of concept easier.
+  // TSC for future PMU implementation
   val reg_time = withClock(io.ungated_clock) { WideCounter(64) }
-
 
   // PMU Interrupt Pending
   val reg_pip = RegInit(false.B)
+  when (io.pmu_interrupt) {
+    reg_pip := true.B
+  }
+
+  io.pmu_overflow := false.B
+  io.pmu_value := DontCare
+
+  /* PMU Implementation not yet finished!
   // PMU CTRL Registers
   val reg_pmuctrl0 = RegInit(VecInit(Seq.fill(xLen)(false.B)))
   val reg_pmuctrl1 = RegInit(0.U(xLen.W))
@@ -516,11 +522,8 @@ class CSRFile(
   // logic is first the pmu needs to be enabled, then
   //   either the overflow happens and the interrupt line is high
   //   or the interrupt line is pulled up
-  val pmu_event_interrupt: Bool = pmu_event_enable && (io.pmu_interrupt && (!RegNext(io.pmu_interrupt) || (pmu_event_fire && !RegNext(pmu_event_fire))))
-  when (pmu_event_interrupt) {
-    reg_pip := true.B
-  }
-  val pmu_event_interrupt_pending: Bool = pmu_event_interrupt || reg_pip
+
+  */
 
   // Hardware Sampling Registers
   val reg_hwsample_value = RegInit(0.U(xLen.W))
@@ -543,31 +546,6 @@ class CSRFile(
     reg_hwsample_flags := io.hw_sample.flags.bits
   }
 
-  /*
-  // Debug Printf
-
-  when (pmu_event_enable && !RegNext(pmu_event_enable)) {
-    printf("PMU ENABLED\n")
-  }
-  when (!pmu_event_enable && RegNext(pmu_event_enable)) {
-    printf("PMU DISABLED\n")
-  }
-  when (pmu_event_overflow =/= RegNext(pmu_event_overflow)) {
-    printf("PMU SET OVERFLOW | Overflow %d\n", pmu_event_overflow)
-  }
-  when (pmu_event_fire) {
-    printf("PMU OVERFLOW | Overflow @ %d | PMU Value @ %d\n", pmu_event_overflow, pmu_event.value)
-  }
-
-  when(RegNext(pmu_event_interrupt)) {
-    printf("%d | HWSample | oldest %d | [%b%b%b%b%b]", reg_hwsample_value, reg_hwsample_oldest, reg_hwsample_flags(0), reg_hwsample_flags(1), reg_hwsample_flags(2), reg_hwsample_flags(3), reg_hwsample_flags(4))
-    for (i <- 0 until retireWidth) {
-      printf(" | [%b] 0x%x", reg_hwsample_valid(i), reg_hwsample_addresses(i))
-    }
-    printf("\n")
-  }
-  */
-
   val mip = Wire(init=reg_mip)
   mip.lip := (io.interrupts.lip: Seq[Bool])
   mip.mtip := io.interrupts.mtip
@@ -576,7 +554,7 @@ class CSRFile(
   // seip is the OR of reg_mip.seip and the actual line from the PLIC
   io.interrupts.seip.foreach { mip.seip := reg_mip.seip || _ }
   mip.rocc := io.rocc_interrupt
-  mip.perf := pmu_event_interrupt_pending
+  mip.perf := reg_pip
 
   val read_mip = mip.asUInt & supported_interrupts
   val high_interrupts = (if (usingNMI) 0.U else io.interrupts.buserror.map(_ << CSR.busErrorIntCause).getOrElse(0.U))
@@ -634,37 +612,24 @@ class CSRFile(
     CSRs.mtval -> reg_mtval.sextTo(xLen),
     CSRs.mcause -> reg_mcause,
     CSRs.mhartid -> io.hartid,
-    CSRs.pmuctrl0 -> reg_pmuctrl0.asUInt(),
-    CSRs.pmuctrl1 -> reg_pmuctrl1,
     CSRs.hwsamplevalue -> reg_hwsample_value,
     CSRs.hwsampleflags -> Cat(reg_hwsample_oldest, reg_hwsample_valid.asUInt(), reg_hwsample_flags.asUInt()).pad(xLen),
+    CSRs.pmuctrl0 -> 0.U, // TODO: connect PMU once implemented
+    CSRs.pmuctrl1 -> 0.U,
   )
-
-  // Reintroduce time CSR for PMU proof of concept.
-  read_mapping += CSRs.time -> reg_time
-  read_mapping += CSRs.timeh -> (reg_time >> 32)
 
   assert(retireWidth <= 6, "HWSample currently supports retire widths up to only 6")
   // Explicitly map hardware sample to a special CSR
-  if (retireWidth > 0) {
-    read_mapping += CSRs.hwsampleip0 -> reg_hwsample_addresses(0)
+  for (i <- 0 until retireWidth) {
+    i match {
+      case 0 => read_mapping += CSRs.hwsampleip0 -> reg_hwsample_addresses(0)
+      case 1 => read_mapping += CSRs.hwsampleip1 -> reg_hwsample_addresses(1)
+      case 2 => read_mapping += CSRs.hwsampleip2 -> reg_hwsample_addresses(2)
+      case 3 => read_mapping += CSRs.hwsampleip3 -> reg_hwsample_addresses(3)
+      case 4 => read_mapping += CSRs.hwsampleip4 -> reg_hwsample_addresses(4)
+      case 5 => read_mapping += CSRs.hwsampleip5 -> reg_hwsample_addresses(5)
+    }
   }
-  if (retireWidth > 1) {
-    read_mapping += CSRs.hwsampleip1 -> reg_hwsample_addresses(1)
-  }
-  if (retireWidth > 2) {
-    read_mapping += CSRs.hwsampleip2 -> reg_hwsample_addresses(2)
-  }
-  if (retireWidth > 3) {
-    read_mapping += CSRs.hwsampleip3 -> reg_hwsample_addresses(3)
-  }
-  if (retireWidth > 4) {
-    read_mapping += CSRs.hwsampleip4 -> reg_hwsample_addresses(4)
-  }
-  if (retireWidth > 5) {
-    read_mapping += CSRs.hwsampleip5 -> reg_hwsample_addresses(5)
-  }
-
 
   val debug_csrs = if (!usingDebug) LinkedHashMap() else LinkedHashMap[Int,Bits](
     CSRs.dcsr -> reg_dcsr.asUInt,
@@ -1080,16 +1045,7 @@ class CSRFile(
     }
 
 
-    // PMU Control Register write logic
-    when(decoded_addr(CSRs.pmuctrl0)) {
-      reg_pmuctrl0 := wdata.asBools()
-      // Interrupt gets acknowledged if one writes to the control regs
-      reg_pip := false.B
-      mip.perf := false.B
-    }
-    when(decoded_addr(CSRs.pmuctrl1)) {
-      reg_pmuctrl1 := wdata
-      // Interrupt gets acknowledged if one writes to the control regs
+    when(decoded_addr(CSRs.pmuctrl0) || decoded_addr(CSRs.pmuctrl1)) {
       reg_pip := false.B
       mip.perf := false.B
     }
