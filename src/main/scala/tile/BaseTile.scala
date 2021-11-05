@@ -134,14 +134,7 @@ trait HasNonDiplomaticTileParameters {
       "riscv,pmpregions" -> tileParams.core.nPMPs.asProperty,
       "riscv,pmpgranularity" -> tileParams.core.pmpGranularity.asProperty) else Nil
 
-    val hwsampler = if (!tileParams.core.HWSampler) Nil else Map(
-      "has-hwsampler" -> tileParams.core.retireWidth.asProperty)
-
-    val pmu = Map (
-      "has-pmu" -> Nil
-    )
-
-    dcache ++ icache ++ dtlb ++ itlb ++ mmu ++ pmp ++ incoherent ++ hwsampler ++ pmu
+    dcache ++ icache ++ dtlb ++ itlb ++ mmu ++ pmp ++ incoherent   
   }
 
 }

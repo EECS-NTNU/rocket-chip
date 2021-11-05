@@ -51,6 +51,8 @@ class TLBResp(implicit p: Parameters) extends CoreBundle()(p) {
   val cacheable = Bool()
   val must_alloc = Bool()
   val prefetchable = Bool()
+  val tlb_miss = Bool()
+  val ptw_fired = Bool()
 }
 
 class TLBEntryData(implicit p: Parameters) extends CoreBundle()(p) {
@@ -353,6 +355,8 @@ class TLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: T
   io.resp.prefetchable := (prefetchable_array & hits).orR && edge.manager.managers.forall(m => !m.supportsAcquireB || m.supportsHint)
   io.resp.miss := do_refill || tlb_miss || multipleHits
   io.resp.paddr := Cat(ppn, io.req.bits.vaddr(pgIdxBits-1, 0))
+  io.resp.tlb_miss := usingVM.B && tlb_miss
+  io.resp.ptw_fired := usingVM.B && io.req.fire() && tlb_miss
 
   io.ptw.req.valid := state === s_request
   io.ptw.req.bits.valid := !io.kill

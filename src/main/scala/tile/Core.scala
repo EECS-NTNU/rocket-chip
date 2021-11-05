@@ -49,7 +49,6 @@ trait CoreParams {
   val mtvecInit: Option[BigInt]
   val mtvecWritable: Boolean
 
-  def HWSampler: Boolean = false
   def genericTraceInterfaceWidth: Int = 0
 
   def customCSRs(implicit p: Parameters): CustomCSRs = new CustomCSRs
@@ -103,7 +102,6 @@ trait HasCoreParameters extends HasTileParameters {
   val mtvecInit = coreParams.mtvecInit
   val mtvecWritable = coreParams.mtvecWritable
 
-  val HWSampler = coreParams.HWSampler
   val genericTraceInterfaceWidth = coreParams.genericTraceInterfaceWidth
 
   def vLen = coreParams.vLen
